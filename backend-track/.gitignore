@@ -1,0 +1,8 @@
+.ssh/
+.termux/
+.gitconfig
+venv/
+__pycache__/
+*.pyc
+log.txt
+message.json
