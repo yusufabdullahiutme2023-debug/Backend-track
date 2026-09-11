@@ -1,0 +1,6 @@
+.cache/
+.git-credentials
+.gitconfig
+.ssh/
+.termux/
+__pycache__/
