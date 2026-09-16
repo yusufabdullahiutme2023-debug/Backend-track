@@ -6,3 +6,4 @@ message.json
 .ssh/
 .termux/
 .gitconfig
+.lesshst
