@@ -88,6 +88,7 @@ final API depends on.
 ```
 Backend-track/
 ├── README.md                  ← you are here
+├── verify.sh                  ← one-command proof script (see Getting started, step 3)
 ├── .gitignore                 ← repo-level: caches, credentials, messages.db, shell history
 └── backend-track/
     ├── .gitignore             ← code-level: venv/, __pycache__/, log.txt, message.json
@@ -136,7 +137,26 @@ Then open:
 - **Alternative docs (ReDoc):** http://127.0.0.1:8000/redoc
 - **Health check:** http://127.0.0.1:8000/
 
-### 3. Run the tests
+### 3. Verify everything in one command
+
+```bash
+bash verify.sh
+```
+
+`verify.sh` (repo root) is a self-contained proof script. It prints who/where/when it
+ran and the git push status, lists the dependency versions, **reproduces the original
+`no such table: messages` crash using your Week 5 `main.py` pulled straight out of git
+history**, then shows the current code working under identical conditions, runs pytest,
+and boots uvicorn against a throwaway database to drive every route with `curl`.
+
+Each assertion prints `PASS`/`FAIL` with the expected and actual value; the exit code is
+the number of failures (`0` = everything passed). It never touches your real
+`messages.db`, and it can be pointed at another port with `VERIFY_PORT=9000 bash verify.sh`.
+
+A negative control confirms the checks are real: reverting only `backend-track/main.py`
+to commit `bd62303` makes the same script report `passed: 6  failed: 19`.
+
+### 4. Run the tests
 
 ```bash
 cd backend-track
@@ -151,7 +171,7 @@ Each test points `main.DB_PATH` at a temporary file, so your real `messages.db` 
 never touched. To start from a clean database manually, just delete `messages.db`
 (it is regenerated on the next startup).
 
-### 4. Run the earlier exercises (optional)
+### 5. Run the earlier exercises (optional)
 
 ```bash
 cd backend-track
