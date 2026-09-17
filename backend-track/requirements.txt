@@ -1,0 +1,8 @@
+# Runtime dependencies for the Customer Message Triage API (backend-track/main.py)
+# Install with:  pip install -r requirements.txt
+fastapi>=0.141,<1.0
+uvicorn[standard]>=0.53,<1.0
+pydantic>=2.13,<3.0
+
+# Used only by the day9.py HTTP exercise
+requests>=2.34,<3.0

@@ -4,7 +4,7 @@ A progressive Python backend learning track that builds, day by day, toward a wo
 **customer message triage service**: messages come in, get automatically classified,
 are persisted to SQLite, and can be listed, approved, or deleted over a REST API.
 
-Built with **FastAPI**, **Pydantic**, and **SQLite**.
+Built with **FastAPI**, **Pydantic v2**, and **SQLite**. Covered by **31 pytest tests**.
 
 ---
 
@@ -12,7 +12,7 @@ Built with **FastAPI**, **Pydantic**, and **SQLite**.
 
 A customer message arrives with a `sender` and some `text`. The backend:
 
-1. **Validates** it (non-empty, not whitespace-only, length-capped).
+1. **Validates** it (non-empty, not whitespace-only, length-capped, trimmed).
 2. **Classifies** it by keyword into one of three categories.
 3. **Stores** it in SQLite with a lifecycle `status` that starts as `pending`.
 4. **Exposes** it over REST so an operator can review, approve, or delete it.
@@ -20,7 +20,8 @@ A customer message arrives with a `sender` and some `text`. The backend:
 ### Classification rules
 
 Implemented in `classify()` in `main.py` (and as `Message.classify()` in the earlier exercises).
-Matching is case-insensitive and checked in this order:
+Matching is case-insensitive and checked in this order, so a message containing both
+keywords is classified as `pricing`:
 
 | If the message text contains… | Category |
 | --- | --- |
@@ -51,6 +52,7 @@ final API depends on.
 | Day 9 | [`backend-track/day9.py`](backend-track/day9.py) | HTTP clients — calling the GitHub API with `requests` and reading `status_code` |
 | Week 2 | [`backend-track/week2_project.py`](backend-track/week2_project.py) | Putting it together — batch-classify a list of messages and write an audit log |
 | Week 5 | [`backend-track/main.py`](backend-track/main.py) | The real service — FastAPI CRUD endpoints, Pydantic validation, SQLite persistence |
+| Week 6 | [`backend-track/test_main.py`](backend-track/test_main.py) | Automated testing — pytest fixtures, parametrised cases, an isolated database per test |
 
 ### What Week 5 added
 
@@ -61,7 +63,23 @@ final API depends on.
   `sqlite3.connect()`, so the connection closes in a `finally` block even when a query
   raises. Every endpoint uses `with get_db() as conn:`.
 - **Typed responses** — `MessageOut` (`id`, `sender`, `text`, `category`, `status`)
-  documents and enforces the shape of `POST` / `GET /{id}` responses.
+  documents and enforces the shape of the API's responses.
+
+### What Week 6 added
+
+- **Automatic schema creation** — `init_db()` runs from a FastAPI `lifespan` hook at
+  startup, so `messages.db` and its `messages` table are created on a fresh clone with
+  no manual SQL. Previously the app crashed with `no such table: messages`.
+- **Pydantic v2 migration** — `@validator` → `@field_validator(...)` + `@classmethod`,
+  clearing the deprecation warning (`@validator` is removed in Pydantic v3).
+- **Dependency pinning** — `requirements.txt` and `requirements-dev.txt`.
+- **Test suite** — 31 tests covering schema init, every classification branch,
+  validation rejections, trimming, length limits, 404 paths, the approve transition
+  and its persistence, and delete isolation.
+- **Correct HTTP semantics** — `POST /messages` now returns `201 Created`; list,
+  single-get and approve responses are typed with `response_model`.
+- **Configurable database path** — set `MESSAGES_DB_PATH` to point the app elsewhere
+  (this is how the tests isolate themselves).
 
 ---
 
@@ -74,9 +92,12 @@ Backend-track/
 └── backend-track/
     ├── .gitignore             ← code-level: venv/, __pycache__/, log.txt, message.json
     ├── main.py                ← FastAPI application (the deliverable)
+    ├── test_main.py           ← pytest suite (31 tests)
+    ├── requirements.txt       ← runtime dependencies
+    ├── requirements-dev.txt   ← test dependencies
     ├── week2_project.py       ← batch classification exercise
     ├── day6.py … day9.py      ← daily concept exercises
-    ├── messages.db            ← SQLite database (created at runtime, git-ignored)
+    ├── messages.db            ← SQLite database (created at startup, git-ignored)
     ├── log.txt                ← written by day7 / week2 (git-ignored)
     └── message.json           ← written by day8 (git-ignored)
 ```
@@ -85,64 +106,50 @@ Backend-track/
 
 ## Getting started
 
-### 1. Install dependencies
-
 Python 3.11+ recommended.
 
-```bash
-pip install fastapi "uvicorn[standard]" requests
-```
-
-(`requests` is only needed for `day9.py`.)
-
-### 2. Create the database table
-
-⚠️ **Known gap:** `main.py` reads and writes a `messages` table but does not create it.
-Until schema initialisation is added to the app (see [Roadmap](#roadmap--next-steps)),
-create it once by hand from inside `backend-track/`:
-
-```bash
-sqlite3 messages.db <<'SQL'
-CREATE TABLE IF NOT EXISTS messages (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    sender   TEXT NOT NULL,
-    text     TEXT NOT NULL,
-    category TEXT NOT NULL,
-    status   TEXT NOT NULL DEFAULT 'pending'
-);
-SQL
-```
-
-No `sqlite3` CLI? The same thing in Python:
-
-```bash
-python - <<'PY'
-import sqlite3
-with sqlite3.connect("messages.db") as conn:
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender TEXT NOT NULL,
-            text TEXT NOT NULL,
-            category TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending'
-        )
-    """)
-PY
-```
-
-### 3. Run the API
+### 1. Install dependencies
 
 ```bash
 cd backend-track
+pip install -r requirements.txt              # runtime
+pip install -r requirements-dev.txt          # optional, for the tests
+```
+
+### 2. Run the API
+
+```bash
 uvicorn main:app --reload
 ```
+
+or simply:
+
+```bash
+python main.py
+```
+
+The `messages` table is created automatically on startup — there is nothing to set up.
 
 Then open:
 
 - **Interactive docs (Swagger UI):** http://127.0.0.1:8000/docs
 - **Alternative docs (ReDoc):** http://127.0.0.1:8000/redoc
 - **Health check:** http://127.0.0.1:8000/
+
+### 3. Run the tests
+
+```bash
+cd backend-track
+pytest -v
+```
+
+```
+31 passed
+```
+
+Each test points `main.DB_PATH` at a temporary file, so your real `messages.db` is
+never touched. To start from a clean database manually, just delete `messages.db`
+(it is regenerated on the next startup).
 
 ### 4. Run the earlier exercises (optional)
 
@@ -171,7 +178,7 @@ curl http://127.0.0.1:8000/
 { "status": "alive" }
 ```
 
-### `POST /messages` — create and classify a message
+### `POST /messages` — create and classify a message → `201 Created`
 
 ```bash
 curl -X POST http://127.0.0.1:8000/messages \
@@ -181,9 +188,9 @@ curl -X POST http://127.0.0.1:8000/messages \
 
 ```json
 {
-  "id": 1,
   "sender": "customer_A",
   "text": "what is the price for 50 bags of rice?",
+  "id": 1,
   "category": "pricing",
   "status": "pending"
 }
@@ -196,7 +203,20 @@ Request body:
 | `sender` | string | required, 1–100 chars, no blank/whitespace-only, trimmed |
 | `text` | string | required, 1–2000 chars, no blank/whitespace-only, trimmed |
 
-Errors: `422 Unprocessable Entity` when validation fails.
+Errors: `422 Unprocessable Entity` when validation fails, e.g.
+
+```json
+{
+  "detail": [
+    {
+      "type": "value_error",
+      "loc": ["body", "sender"],
+      "msg": "Value error, must not be blank or whitespace-only",
+      "input": "   "
+    }
+  ]
+}
+```
 
 ### `GET /messages` — list all messages
 
@@ -204,11 +224,7 @@ Errors: `422 Unprocessable Entity` when validation fails.
 curl http://127.0.0.1:8000/messages
 ```
 
-```json
-[
-  { "id": 1, "sender": "customer_A", "text": "…", "category": "pricing", "status": "pending" }
-]
-```
+Returns a JSON array ordered by `id`, empty (`[]`) on a fresh database.
 
 ### `GET /messages/{id}` — fetch one message
 
@@ -225,10 +241,16 @@ curl -X PUT http://127.0.0.1:8000/messages/1/approve
 ```
 
 ```json
-{ "id": 1, "sender": "customer_A", "text": "…", "category": "pricing", "status": "approved" }
+{
+  "sender": "customer_A",
+  "text": "what is the price for 50 bags of rice?",
+  "id": 1,
+  "category": "pricing",
+  "status": "approved"
+}
 ```
 
-Returns `404` if the id does not exist.
+Idempotent — approving twice is fine. Returns `404` if the id does not exist.
 
 ### `DELETE /messages/{id}` — delete a message
 
@@ -246,18 +268,20 @@ Returns `404` if the id does not exist.
 
 ## Roadmap / next steps
 
-- [ ] **Schema initialisation** — create the `messages` table automatically on app
-      startup (a `lifespan` handler or `init_db()` called from one) so a fresh clone
-      runs with zero manual SQL. *This is the current blocker for a clean setup.*
-- [ ] **`requirements.txt`** — pin `fastapi`, `uvicorn`, `requests` (and dev deps).
-- [ ] **Pydantic v2 spelling** — `@validator` is deprecated; migrate to
-      `@field_validator("sender", "text")`.
-- [ ] **Tests** — `pytest` + `httpx.AsyncClient`/`TestClient` covering validation
-      rejections, each classification branch, the 404 paths, and the approve transition.
+- [x] **Schema initialisation** — `init_db()` on app startup via a `lifespan` hook.
+- [x] **`requirements.txt`** — runtime and dev dependencies pinned.
+- [x] **Pydantic v2 spelling** — migrated to `@field_validator`.
+- [x] **Tests** — 31 pytest cases covering validation, classification, 404s and the
+      approve transition.
 - [ ] **Pagination & filtering** — `GET /messages?limit=&offset=&category=&status=`.
 - [ ] **Repository/service layer** — move SQL out of the route handlers.
-- [ ] **Richer classification** — scoring or a small ML model instead of substring matching.
+- [ ] **Reject → resolved statuses** — a fuller lifecycle than `pending`/`approved`
+      (e.g. `rejected`, `replied`) with transition rules.
+- [ ] **Richer classification** — scoring or a small ML model instead of substring
+      matching; make categories data-driven rather than hardcoded.
 - [ ] **Auth** — protect `PUT /approve` and `DELETE` behind an API key or JWT.
+- [ ] **CI** — a GitHub Action running `pytest` on push.
+- [ ] **Containerise** — a `Dockerfile` plus a volume for `messages.db`.
 
 ---
 
@@ -272,3 +296,4 @@ Returns `404` if the id does not exist.
   the concept it adds.
 - Tidying opportunity: the root `.gitignore` repeats `messages.db` and `.python_history`,
   and duplicates several rules already covered by `backend-track/.gitignore`.
+- Verified against FastAPI 0.141, Pydantic 2.13, Starlette 1.6, uvicorn 0.53 on Python 3.11.

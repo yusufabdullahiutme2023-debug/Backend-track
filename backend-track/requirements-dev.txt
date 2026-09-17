@@ -1,0 +1,5 @@
+# Test dependencies — install on top of requirements.txt
+# Install with:  pip install -r requirements.txt -r requirements-dev.txt
+# Run tests with: pytest -v
+pytest>=9.0,<10.0
+httpx>=0.28,<1.0
