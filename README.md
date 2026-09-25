@@ -1,38 +1,58 @@
-# Backend Track: Messages API
+# Python Backend API
 
-A FastAPI service that accepts messages, auto-categorizes them, and supports an approval workflow. Containerized with Docker, built and smoke-tested by GitHub Actions on every push, and deployed on Render.
+A message-management API built with FastAPI, featuring JWT authentication and a PostgreSQL database. Deployed live on Render with automated testing via GitHub Actions.
 
 **Live API:** https://backend-track-nz8c.onrender.com
-**Interactive docs (Swagger):** https://backend-track-nz8c.onrender.com/docs
-
-> Hosted on a free tier: the first request after idle can take about 50 seconds, and stored messages reset when the service restarts.
-
-## Endpoints
-
-| Method | Path | What it does |
-|---|---|---|
-| GET | `/` | Health check |
-| POST | `/messages` | Create a message (auto-categorized, status `pending`) |
-| GET | `/messages` | List all messages |
-| GET | `/messages/{id}` | Get one message |
-| PUT | `/messages/{id}/approve` | Mark a message as approved |
-| DELETE | `/messages/{id}` | Delete a message |
-
-Validation: `sender` (1-100 chars) and `text` (1-2000 chars) are required and cannot be blank.
+(Free-tier instance — the first request after inactivity may take up to a minute.)
 
 ## Stack
 
-FastAPI, Pydantic, SQLite, Docker, GitHub Actions (CI), Render (hosting).
+- **Framework:** FastAPI (Python)
+- **Database:** PostgreSQL (hosted on Neon)
+- **Auth:** JWT via python-jose, password hashing via passlib/bcrypt
+- **Deployment:** Docker, Render
+- **CI/CD:** GitHub Actions — builds the Docker image, spins up a Postgres service container, and runs a live smoke test (register → login → create → list) on every push
+
+## Endpoints
+
+| Method | Path | Auth required | Description |
+|---|---|---|---|
+| POST | `/register` | No | Create a new user account |
+| POST | `/token` | No | Log in, returns a JWT access token |
+| GET | `/` | No | Health check |
+| POST | `/messages` | Yes | Submit a message (auto-classified into a category) |
+| GET | `/messages` | No | List all messages |
+| GET | `/messages/{message_id}` | No | Get a single message |
+| PUT | `/messages/{message_id}/approve` | Yes | Mark a message approved |
+| DELETE | `/messages/{message_id}` | Yes | Delete a message |
 
 ## Run locally
 
-    docker build -t backend-track ./backend-track
-    docker run -p 8000:8000 backend-track
+```bash
+git clone https://github.com/yusufabdullahiutme2023-debug/Backend-track.git
+cd Backend-track/backend-track
+pip install -r requirements.txt
 
-Then open http://localhost:8000/docs
+export DATABASE_URL='postgresql://user:password@host/dbname'
+export SECRET_KEY='your-own-secret-key'
 
-## Roadmap
+uvicorn main:app --reload
+```
 
-- Authentication (JWT) and user registration
-- PostgreSQL instead of SQLite
-- Automated tests (pytest) in CI
+The app creates its tables automatically on startup.
+
+## Example usage
+
+```bash
+# Register
+curl -X POST "http://localhost:8000/register?username=alice&password=secret123"
+
+# Log in
+curl -X POST http://localhost:8000/token -d "username=alice&password=secret123"
+
+# Create a message (replace TOKEN with the access_token from above)
+curl -X POST http://localhost:8000/messages \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sender":"alice","text":"what is the price"}'
+```
