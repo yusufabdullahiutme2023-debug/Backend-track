@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field, validator
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import redis
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
@@ -52,6 +53,22 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
 
 
 DATABASE_URL = os.environ["DATABASE_URL"]
+
+REDIS_URL = os.environ.get("REDIS_URL")
+redis_client = redis.from_url(REDIS_URL) if REDIS_URL else None
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("RATE_LIMIT_PER_MINUTE", "30"))
+
+
+def check_rate_limit(current_user: str = Depends(get_current_user)) -> str:
+    if redis_client is None:
+        return current_user
+    key = f"ratelimit:{current_user}"
+    count = redis_client.incr(key)
+    if count == 1:
+        redis_client.expire(key, 60)
+    if count > RATE_LIMIT_PER_MINUTE:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again in a minute.")
+    return current_user
 
 
 class DB:
@@ -159,7 +176,7 @@ def read_root():
 
 
 @app.post("/messages", response_model=MessageOut)
-def create_message(message: MessageIn, current_user: str = Depends(get_current_user)):
+def create_message(message: MessageIn, current_user: str = Depends(check_rate_limit)):
     category = classify(message.text)
     with get_db() as conn:
         cursor = conn.execute(
