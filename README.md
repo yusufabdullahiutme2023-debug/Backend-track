@@ -12,6 +12,7 @@ A message-management API built with FastAPI, featuring JWT authentication and a 
 - **Auth:** JWT via python-jose, password hashing via passlib/bcrypt
 - **Deployment:** Docker, Render
 - **CI/CD:** GitHub Actions — builds the Docker image, spins up a Postgres service container, and runs a live smoke test (register → login → create → list) on every push
+- **Rate limiting:** per-user request throttling via Redis (Upstash), configurable via `RATE_LIMIT_PER_MINUTE`
 
 ## Endpoints
 
