@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+log.txt
+message.json
+.ssh/
+.termux/
+.gitconfig
+.lesshst

@@ -1,0 +1,13 @@
+.cache/
+.git-credentials
+.gitconfig
+.ssh/
+.termux/
+__pycache__/
+messages.db
+.python_history
+messages.db
+.python_history
+.lesshst
+
+.env

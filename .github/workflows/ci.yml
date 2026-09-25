@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t backend-track ./backend-track
+
+      - name: Run container
+        run: |
+          docker run -d --name bt --network host \
+            -e DATABASE_URL=postgresql://postgres:postgres@localhost:5432/testdb \
+            -e SECRET_KEY=ci-test-key \
+            backend-track
+          sleep 5
+
+      - name: Smoke test
+        run: |
+          curl -sf -X POST "localhost:8000/register?username=ci&password=cipass123"
+          TOKEN=$(curl -sf -X POST localhost:8000/token -d "username=ci&password=cipass123" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+          curl -sf -X POST localhost:8000/messages -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"sender":"ci","text":"hello"}'
+          curl -sf localhost:8000/messages | grep '"id":1'
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker logs bt

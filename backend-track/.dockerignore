@@ -1,0 +1,6 @@
+__pycache__
+*.db
+test.json
+day*.py
+week2_project.py
+.git
