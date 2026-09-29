@@ -42,6 +42,20 @@ jobs:
           curl -sf -X POST localhost:8000/messages -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"sender":"ci","text":"hello"}'
           curl -sf localhost:8000/messages | grep '"id":1'
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install -r backend-track/requirements.txt -r backend-track/requirements-dev.txt
+
+      - name: Run test suite
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+          SECRET_KEY: ci-test-key
+        run: cd backend-track && python -m pytest -v
+
       - name: Show logs on failure
         if: failure()
         run: docker logs bt
