@@ -8,6 +8,7 @@ import os
 import sys
 import urllib.request
 from pump_replay import fetch_transaction, parse_launch, parse_buys
+from pump_discover import rpc
 
 SAMPLE = ('https://bitquery-blockchain-dataset.s3.us-east-1.amazonaws.com/'
           'solana/pumpfun_creation_migrations/2026-07-01.parquet')
@@ -42,9 +43,25 @@ def validate(rpc_url):
         if launch is None:
             continue
         # Historical candidate has been independently verified on-chain.
-        # Do not infer first buyers from the creation signature alone.
+        # A bounded lookup is only a sample, NEVER an exhaustive first-buyer list.
+        try:
+            signatures = rpc(rpc_url, 'getSignaturesForAddress',
+                             [launch.pool, {'limit': 100, 'commitment': 'confirmed'}])
+            nearby = [s for s in signatures if launch.slot <= s['slot'] <= launch.end_slot]
+            buys = []
+            for item in sorted(nearby, key=lambda s: s['slot'])[:20]:
+                try:
+                    buys.extend(b.model_dump() for b in parse_buys(
+                        fetch_transaction(rpc_url, item['signature']), launch))
+                except ValueError:
+                    continue
+            state = 'sampled buys verified' if buys else 'no qualifying buys in bounded sample'
+        except ValueError:
+            buys, state, nearby = [], 'curve history unavailable', []
         return {'validated_launch': launch.model_dump(), 'creation_candidates_checked': sampled,
-                'buyer_validation': 'not yet validated', 'source': 'public dataset + RPC'}
+                'sampled_curve_signatures': len(nearby), 'validated_buys': buys,
+                'buyer_validation': state, 'buyers_complete': False,
+                'source': 'public dataset + RPC'}
     raise ValueError(f'No RPC-verified launch among {sampled} historical candidates')
 
 
