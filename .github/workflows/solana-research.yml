@@ -17,7 +17,9 @@ on:
     branches: [arena/01a0ed1a-backend-track, arena/01a0f410-backend-track]
     paths:
       - 'backend-track/pump_actions_sample.py'
+      - 'backend-track/pump_evidence.py'
       - 'backend-track/tests/test_pump_actions_sample.py'
+      - 'backend-track/tests/test_pump_evidence.py'
       - '.github/workflows/solana-research.yml'
 
 permissions:

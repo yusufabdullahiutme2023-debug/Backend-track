@@ -127,3 +127,13 @@ def test_missing_secret_fails_loudly_instead_of_sampling_nothing():
 def test_report_fields_are_written_to_the_artifact(field):
     assert 'pump-evidence.json' in STEPS[-1]['with']['path']
     assert field in step_by_name('Validate early buyers')['run']
+
+
+def test_push_paths_cover_every_script_the_workflow_executes():
+    """A change to a script the workflow runs must re-trigger it."""
+    # PyYAML reads the bare `on:` key as boolean True.
+    triggers = SPEC.get('on', SPEC.get(True))
+    paths = triggers['push']['paths']
+    for script in ('backend-track/pump_actions_sample.py', 'backend-track/pump_evidence.py'):
+        assert script in paths, f'{script} is executed by this workflow but not watched'
+    assert '.github/workflows/solana-research.yml' in paths
