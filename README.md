@@ -172,3 +172,19 @@ The workflow fails closed if the secret is absent or no qualifying buy is found.
 It does not submit orders or log your RPC URL. GitHub may only show a newly
 added manual workflow in the Actions UI after it is present on the default
 branch; do not merge solely to trigger this test without reviewing the changes.
+
+#### Dedicated Pump.fun watcher (experimental, NOT deployed)
+
+`backend-track/pump_worker.py` subscribes to confirmed Pump.fun program logs,
+validates creation transactions against the official program ID and instruction
+discriminator, and stores launch evidence plus a crash-safe cursor in PostgreSQL.
+It subscribes before bounded reconnect backfill and refuses to silently cross a
+gap larger than 10,000 transactions. It is read-only and does **not** claim a
+verified first-buyer set, funding trace, PnL, or production alert signal.
+
+Run only as a *separate persistent worker* with private `SOLANA_RPC_URL` (Helius
+Mainnet HTTPS URL) and `DATABASE_URL` in the worker's secret environment. Do not
+run it inside the web server or GitHub Actions: those are not persistent worker
+hosts. Monitor Helius credits and run reconciliation tests before deployment.
+Do not store the URL or credentials in Git or chat. If the worker encounters a
+history gap, investigate it; do not reset the cursor to hide missing events.

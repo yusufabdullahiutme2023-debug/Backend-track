@@ -3,6 +3,11 @@ name: Validate historical Pump.fun creation
 on:
   push:
     branches: [arena/01a0ed1a-backend-track]
+    paths:
+      - 'backend-track/pump_historical_sample.py'
+      - 'backend-track/pump_history.py'
+      - 'backend-track/pump_replay.py'
+      - '.github/workflows/solana-sample.yml'
 
 permissions:
   contents: read
