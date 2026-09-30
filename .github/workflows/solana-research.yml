@@ -1,16 +1,22 @@
 name: Bounded Solana launch research
 
 on:
+  # On demand only. There is deliberately no schedule: a timed sample spends
+  # provider credits whether or not anyone reads the result, and a bounded
+  # 60-second snapshot is worth far more when aimed at a specific launch.
   workflow_dispatch:
-  schedule:
-    # GitHub runs scheduled workflows ONLY on the default branch, and timing
-    # can be delayed. Two 60-second samples per day, NOT live monitoring.
-    - cron: '17 6,18 * * *'
+    inputs:
+      launch_signature:
+        description: 'Optional known create/create_v2 signature to validate buyers for (leave empty to discover one)'
+        required: false
+        type: string
   push:
     branches: [arena/01a0ed1a-backend-track]
     paths:
       - 'backend-track/pump_actions_sample.py'
+      - 'backend-track/pump_evidence.py'
       - 'backend-track/tests/test_pump_actions_sample.py'
+      - 'backend-track/tests/test_pump_evidence.py'
       - '.github/workflows/solana-research.yml'
 
 permissions:
@@ -23,7 +29,7 @@ concurrency:
 jobs:
   sample:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -46,6 +52,12 @@ jobs:
           data = json.load(open('pump-report.json'))
           print(f"::notice::Bounded research: validated={len(data['validated_launches'])} "
                 f"candidates={data['candidates']} unavailable={data['unavailable_transactions']}")
+          # Artifact blobs sit on Azure blob storage, which restricted networks
+          # cannot download. Mirror every validated launch into an annotation so
+          # the run stays inspectable through the public check-run annotations API.
+          for launch in data['validated_launches']:
+              print(f"::notice::Validated launch mint={launch['mint']} pool={launch['pool']} "
+                    f"slot={launch['slot']} signature={launch['signature']}")
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write('### Bounded Solana research (NOT live)\n')
               f.write(f"Validated launches: {len(data['validated_launches'])}; "
@@ -54,10 +66,78 @@ jobs:
               for launch in data['validated_launches']:
                   f.write(f"- {launch['signature']} — mint {launch['mint']} (slot {launch['slot']})\n")
           PY
+      - name: Validate early buyers for one launch (read-only, no transactions sent)
+        working-directory: backend-track
+        env:
+          SOLANA_RPC_URL: ${{ secrets.HELIUS_RPC_URL }}
+          LAUNCH_SIGNATURE: ${{ inputs.launch_signature }}
+        run: |
+          if [ -z "$SOLANA_RPC_URL" ]; then
+            echo 'Missing HELIUS_RPC_URL repository Actions secret' >&2
+            exit 1
+          fi
+          if [ -z "$LAUNCH_SIGNATURE" ] && ! grep -q '"signature"' pump-report.json 2>/dev/null; then
+            # A quiet sample is missing data. It is never a finding that no
+            # launches or no buyers existed.
+            echo '::warning::Evidence status: unknown/incomplete; the bounded sample validated no launch, so buyer coverage is unknown'
+            exit 0
+          fi
+          if [ -n "$LAUNCH_SIGNATURE" ]; then
+            ARGS="--launch-signature $LAUNCH_SIGNATURE"
+          else
+            # A launch that is seconds old often has no decodable buy yet, so
+            # evaluate a bounded set of candidates rather than only the first.
+            ARGS="--from-report pump-report.json --max-launches 3"
+          fi
+          set +e
+          python pump_evidence.py $ARGS --output pump-evidence.json
+          status=$?
+          set -e
+          if [ ! -f pump-evidence.json ]; then
+            # Unreachable launch-time data is unknown/incomplete, which must not
+            # be reported as a green run that silently found nothing.
+            echo "::warning::Evidence status: unknown/incomplete; no evidence collected (exit $status)"
+            exit 0
+          fi
+          python - <<'PY'
+          import json, os
+          report = json.load(open('pump-evidence.json'))
+          coverage = report['coverage']
+          status = report['evidence_status']
+          level = 'warning' if status == 'unknown_incomplete' else 'notice'
+          print(f"::{level}::Evidence status: {status}; "
+                f"buyer_count_known={str(report['buyer_count_known']).lower()}")
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('\n### Early-buyer evidence (read-only)\n')
+              f.write(f"Launch: `{report['launch']['signature']}` — mint "
+                      f"`{report['launch']['mint']}` (slot {report['launch']['slot']})\n\n")
+              f.write(f"- **evidence_status: {status}**\n")
+              f.write(f"- Verified buys (lower bound): {report['verified_buy_count']}\n")
+              f.write(f"- Distinct wallets (lower bound): {report['distinct_wallet_count']}\n")
+              f.write(f"- buyer_count_known: {report['buyer_count_known']}\n")
+              f.write(f"- Pages scanned: {coverage['pages_scanned']}\n")
+              f.write(f"- In-window signatures seen: {coverage['early_signatures_seen']}\n")
+              f.write(f"- Transactions attempted/fetched: {coverage['transactions_attempted']}/"
+                      f"{coverage['transactions_fetched']}\n")
+              f.write(f"- unavailable_transactions: {coverage['unavailable_transactions']}\n")
+              f.write(f"- reached_launch_slot: {coverage['reached_launch_slot']}\n")
+              f.write(f"- coverage_proven: {coverage['coverage_proven']}\n")
+              for reason in coverage['unreachable_reasons']:
+                  f.write(f"- Unreachable: {reason}\n")
+              f.write('\n')
+              f.write(f"**claim:** {report['claim']}\n")
+          PY
       - name: Retain public evidence for seven days
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: solana-launch-research-${{ github.run_id }}
-          path: backend-track/pump-report.json
+          # Attempt-scoped on purpose. upload-artifact requires unique names and
+          # returns conflict errors on a duplicate, so including the attempt keeps
+          # a re-run from colliding with the artifact an earlier attempt already
+          # published under this run id.
+          name: solana-launch-research-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            backend-track/pump-report.json
+            backend-track/pump-evidence.json
+          if-no-files-found: warn
           retention-days: 7

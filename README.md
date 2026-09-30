@@ -219,12 +219,87 @@ reconnecting repeatedly or using credits faster than expected.
 #### No-card, bounded GitHub Actions research
 
 `.github/workflows/solana-research.yml` uses the existing GitHub Actions
-`HELIUS_RPC_URL` secret to listen for **60 seconds twice daily** (06:17 and
-18:17 UTC), with at most eight on-chain transaction lookups per run. It retains
-a public-evidence JSON artifact for seven days. It never uses a wallet, places
-orders, writes to Neon, or claims first-buyer coverage. A quiet sample (zero
-launches) is a valid result, **not** evidence that no launches occurred.
-Actions schedules can be delayed or skipped and run only from the repository's
-**default branch**. The workflow on the Arena branch can be push-tested now;
-the schedule will not activate until the code is reviewed and merged into the
-default branch. Do not mistake these short snapshots for persistent hosting.
+`HELIUS_RPC_URL` secret to listen for **60 seconds on demand**, with at most
+eight on-chain transaction lookups per run. It retains a public-evidence JSON
+artifact for seven days. It never uses a wallet, places orders, writes to Neon,
+or claims first-buyer coverage. A quiet sample (zero launches) is a valid
+result, **not** evidence that no launches occurred.
+
+There is deliberately **no schedule**. A timed sample spends provider credits
+whether or not anyone reads the output, and a bounded 60-second snapshot is
+worth far more when aimed at a launch whose history has settled. Trigger it with
+`Run workflow`, optionally passing a specific `launch_signature`:
+
+```bash
+gh workflow run 371464611 --ref main -f launch_signature=<create-tx-signature>
+```
+
+Prefer a launch that is several minutes old. A creation that is seconds old
+usually has almost no bonding-curve history yet and may not be indexed, which
+produces `unknown_incomplete` far more often than the data warrants. Do not
+mistake these short snapshots for persistent hosting.
+
+#### Early-buyer evidence and retrieving a run's findings
+
+`backend-track/pump_evidence.py` takes **one** RPC-verified launch and reports its
+early buyers with the proof behind each one: the decoded `buy` discriminator, the
+matching mint and bonding curve, a signing buyer, and a positive token balance
+delta. Every run also reports coverage accounting — pages scanned, in-window
+signatures seen, transactions attempted versus fetched, unavailable transactions,
+and whether pagination ever reached the launch slot.
+
+Coverage rules are enforced in code, not just documented. Every report carries an
+explicit `evidence_status`:
+
+| `evidence_status` | Meaning |
+|---|---|
+| `buys_observed` | ≥1 buy verified; the count is a **lower bound** |
+| `no_buys_in_window` | zero buys **and** coverage independently proven |
+| `coverage_proven` | full coverage independently attested |
+| `unknown_incomplete` | the launch-time window could not be read; buyer count is **UNKNOWN** |
+
+`unknown_incomplete` is what a bounded run reports when the RPC returns no
+in-window signatures, when every launch-time transaction it tried was
+unavailable, or when pagination never reached the launch slot. Missing data is
+**never** reported as "zero buyers" — that would be a false negative dressed up
+as a finding. Two guard rails enforce this at publish time:
+
+- `coverage_proven` is `False` unless pagination reached the launch slot, nothing
+  in the window was unavailable or skipped, **and** an independent block-level
+  attestation exists. RPC pagination depth alone never proves completeness.
+- `assert_no_unproven_first_n_claim` and `assert_no_unproven_zero_claim` raise if
+  the claim asserts a "first N buyers" list or a zero-buyer count that the
+  evidence does not support. Explicit disclaimers ("NOT the first 50 buyers") are
+  stripped before the check so a denial is never mistaken for an overclaim.
+
+`buyer_count_known` and `first_n_claim_allowed` are `True` only when coverage is
+proven. The workflow surfaces the status as a `::warning::` annotation when
+incomplete, and still exits 0 — an unknown result is a finding, not a broken
+pipeline.
+
+**Bundled versus independent buys.** Pump.fun creations are frequently bundled
+with an initial buy in the *same* transaction. That is a real,
+instruction-verified buy, but it is not evidence of independent early demand, so
+the two are never counted together. Each buy carries
+`bundled_with_creation` (its signature equals the launch signature), and the
+report splits `bundled_buy_count` from `independent_buy_count` /
+`independent_wallet_count`. When every verified buy is bundled, the claim says
+plainly that no independent early buyer is evidenced yet.
+
+Verified against live mainnet: a run that found a single verified buy whose
+signature matched the launch signature is reported as one bundled buy and zero
+independent buyers, not as one early buyer.
+
+Findings are printed as `::notice::` annotations as well as JSON. Workflow
+artifacts live on Azure blob storage, which restricted networks cannot download;
+annotations stay readable through the public check-run annotations API:
+
+```bash
+gh api repos/:owner/:repo/actions/runs/RUN_ID/jobs --jq '.jobs[].id'
+gh api repos/:owner/:repo/check-runs/JOB_ID/annotations --jq '.[].message'
+```
+
+Artifact names are attempt-scoped, so re-running a run does not collide with the
+artifact an earlier attempt already published. Everything here is read-only
+(`getTransaction` / `getSignaturesForAddress`): no transaction is constructed,
+signed, or sent, and no trade is placed.

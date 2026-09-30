@@ -7,3 +7,5 @@ message.json
 .termux/
 .gitconfig
 .lesshst
+pump-report.json
+pump-evidence.json
