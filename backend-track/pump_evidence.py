@@ -125,6 +125,19 @@ def launch_time_reachable(coverage) -> tuple[bool, list[str]]:
     return (not reasons), reasons
 
 
+def annotate_bundling(buys, launch_signature) -> list[dict]:
+    """Flag buys that ride inside the creation transaction.
+
+    Pump.fun creations are frequently bundled with an initial buy in the same
+    transaction. That is a real, instruction-verified buy, but it is NOT
+    evidence of independent early demand, and the two must never be counted
+    together as if they were.
+    """
+    for buy in buys:
+        buy['bundled_with_creation'] = buy['signature'] == launch_signature
+    return buys
+
+
 def coverage_proven(sample, transactions_fetched) -> bool:
     """True only when nothing in the window is unaccounted for AND an external
     attestation exists. Pagination depth by itself is deliberately insufficient.
@@ -159,8 +172,10 @@ def collect_evidence(url, launch, max_pages=4, page_size=100):
     attempted = sample.get('transactions_attempted', 0)
     unavailable = sample['unavailable_transactions']
     fetched = max(attempted - unavailable, 0)
-    buys = sample['buys']
+    buys = annotate_bundling(sample['buys'], launch.signature)
+    independent = [b for b in buys if not b['bundled_with_creation']]
     wallets = {b['wallet'] for b in buys}
+    independent_wallets = {b['wallet'] for b in independent}
     missing_data = []
     if unavailable:
         missing_data.append(f'{unavailable} in-window transaction(s) unavailable from RPC')
@@ -180,6 +195,10 @@ def collect_evidence(url, launch, max_pages=4, page_size=100):
         'distinct_wallets': sorted(wallets),
         'distinct_wallet_count': len(wallets),
         'verified_buy_count': len(buys),
+        # Bundled buys ride inside the creation tx; independent ones do not.
+        'bundled_buy_count': len(buys) - len(independent),
+        'independent_buy_count': len(independent),
+        'independent_wallet_count': len(independent_wallets),
         'evidence_status': None,      # set by classify()
         'buyer_count_known': False,   # only true with proven coverage
         'first_n_claim_allowed': False,
@@ -235,9 +254,20 @@ def early_buyer_claim(report) -> str:
     if status == NO_BUYS_IN_WINDOW:
         return (f'no buys in the launch window ({span}); coverage independently verified, '
                 f'so this is a finding rather than missing data')
+    bundled = report.get('bundled_buy_count', 0)
+    independent_n = report.get('independent_buy_count', 0)
+    if independent_n == 0 and bundled:
+        bundling = (f' All {bundled} verified buy transaction(s) ride inside the creation '
+                    'transaction itself (bundled with create), so no independent early '
+                    'buyer is evidenced yet.')
+    elif bundled:
+        bundling = (f' {bundled} of {len(buys)} verified buys are bundled inside the '
+                    f'creation transaction; {independent_n} are independent.')
+    else:
+        bundling = ''
     return (f'at least {count} distinct early buyers observed across {len(buys)} verified buy '
             f'transactions ({span}); this count is a LOWER BOUND because coverage is '
-            f'incomplete, so it is NOT the first {FIRST_N_BUYERS} buyers. Missing: '
+            f'incomplete, so it is NOT the first {FIRST_N_BUYERS} buyers.{bundling} Missing: '
             + ('; '.join(coverage['missing_data']) or 'no coverage evidence recorded'))
 
 
@@ -291,7 +321,9 @@ def annotation_lines(report, max_lines=12, max_chars=480) -> list[str]:
         f"slot={launch['slot']} signature={launch['signature']}",
         f"::{status_level}::Evidence status: {status}; buyer_count_known="
         f"{str(report['buyer_count_known']).lower()}; verified_buys="
-        f"{report['verified_buy_count']}; signatures_seen="
+        f"{report['verified_buy_count']} (independent="
+        f"{report.get('independent_buy_count', 0)}, bundled="
+        f"{report.get('bundled_buy_count', 0)}); signatures_seen="
         f"{coverage['early_signatures_seen']}; tx_attempted/fetched="
         f"{coverage['transactions_attempted']}/{coverage['transactions_fetched']}; "
         f"reached_launch_slot={str(coverage['reached_launch_slot']).lower()}; unavailable="
@@ -307,7 +339,9 @@ def annotation_lines(report, max_lines=12, max_chars=480) -> list[str]:
         lines.append(
             f"::notice::Buy {index} wallet={buy['wallet']} slot={buy['slot']} "
             f"order={buy['order']} raw_amount={buy['raw_amount']} "
-            f"signature={buy['signature']} proof=buy_ix+mint+pool+signer+token_delta")
+            f"signature={buy['signature']} "
+            f"bundled_with_creation={str(buy.get('bundled_with_creation', False)).lower()} "
+            f"proof=buy_ix+mint+pool+signer+token_delta")
     if omitted:
         lines.append(f'::notice::{omitted} further verified buys omitted from '
                      'annotations; see artifact JSON')

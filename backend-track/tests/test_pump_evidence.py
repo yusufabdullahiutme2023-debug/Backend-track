@@ -27,8 +27,8 @@ def launch(slot=300_000_000):
                   venue='pump.fun', slot=slot, end_slot=slot + 10)
 
 
-def buy(wallet='W' * 32, slot=300_000_001, order=0, raw_amount=1000):
-    return {'wallet': wallet, 'signature': 'b' * 64, 'slot': slot, 'order': order,
+def buy(wallet='W' * 32, slot=300_000_001, order=0, raw_amount=1000, signature='b' * 64):
+    return {'wallet': wallet, 'signature': signature, 'slot': slot, 'order': order,
             'raw_amount': raw_amount, 'verified': True}
 
 
@@ -498,3 +498,54 @@ def test_select_report_prefers_buys_then_the_most_decoded_window():
     assert select_report([many, with_buys]) is with_buys
     assert select_report([few, many]) is many
     assert select_report([]) is None
+
+
+# ------------------- bundled-with-creation vs independent (live run #6 case)
+
+def test_buy_inside_the_creation_transaction_is_flagged_bundled(monkeypatch):
+    """Regression from live run #6: the only verified buy shared the launch signature."""
+    lch = launch()
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[buy(signature=lch.signature)]))
+    report = finalize(collect_evidence(SECRET_URL, lch))
+    assert report['verified_buys'][0]['bundled_with_creation'] is True
+    assert report['bundled_buy_count'] == 1
+    assert report['independent_buy_count'] == 0
+    assert report['independent_wallet_count'] == 0
+    assert 'ride inside the creation transaction' in report['claim']
+    assert 'no independent early buyer is evidenced yet' in report['claim']
+    # A bundled buy must not be sold as independent early demand.
+    assert 'LOWER BOUND' in report['claim']
+
+
+def test_bundled_and_independent_buys_are_never_counted_together(monkeypatch):
+    lch = launch()
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[buy(signature=lch.signature),
+                                                      buy(wallet='V' * 32, order=1)]))
+    report = finalize(collect_evidence(SECRET_URL, lch))
+    assert report['verified_buy_count'] == 2
+    assert report['bundled_buy_count'] == 1
+    assert report['independent_buy_count'] == 1
+    assert report['independent_wallet_count'] == 1
+    assert '1 of 2 verified buys are bundled inside the creation transaction' in report['claim']
+    assert '1 are independent' in report['claim']
+
+
+def test_all_independent_buys_produce_no_bundling_clause(monkeypatch):
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys', lambda *a, **kw: sample())
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    assert report['bundled_buy_count'] == 0
+    assert report['independent_buy_count'] == 1
+    assert 'bundled' not in report['claim']
+
+
+def test_annotations_separate_bundled_from_independent(monkeypatch):
+    lch = launch()
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[buy(signature=lch.signature)]))
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    lines = annotation_lines(report)
+    assert 'independent=0, bundled=1' in lines[1]
+    assert any('bundled_with_creation=true' in line for line in lines)
+    assert all(len(line) <= 480 for line in lines)
