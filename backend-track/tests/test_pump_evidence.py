@@ -10,13 +10,16 @@ import pytest
 
 import pump_evidence
 import pump_history
-from pump_evidence import (BUYS_OBSERVED, COVERAGE_PROVEN, EXIT_LAUNCH_UNKNOWN,
-                           FIRST_N_BUYERS, NO_BUYS_IN_WINDOW, UNKNOWN_INCOMPLETE,
+from pump_evidence import (BUYS_OBSERVED, COVERAGE_PROVEN, DISCOVERY_PAGES,
+                           EXIT_LAUNCH_UNKNOWN,
+                           FIRST_N_BUYERS, NAMED_LAUNCH_PAGES, NO_BUYS_IN_WINDOW,
+                           UNKNOWN_INCOMPLETE,
                            UNKNOWN_PHRASE, annotation_lines,
                            assert_no_unproven_first_n_claim, assert_no_unproven_zero_claim,
                            collect_evidence, coverage_proven, early_buyer_claim, evaluate_candidates,
                            finalize, find_launch, launch_time_reachable,
-                           launches_from_report, redact, select_report)
+                           launches_from_report, redact, resolve_max_pages,
+                           select_report)
 from solana_signals import Launch
 
 SECRET_URL = 'https://mainnet.helius-rpc.com/?api-key=SUPERSECRETKEY'
@@ -549,3 +552,49 @@ def test_annotations_separate_bundled_from_independent(monkeypatch):
     assert 'independent=0, bundled=1' in lines[1]
     assert any('bundled_with_creation=true' in line for line in lines)
     assert all(len(line) <= 480 for line in lines)
+
+
+# ------------------------------- pagination depth for older, named launches
+
+def test_named_launch_paginates_deeper_than_discovery():
+    """An old launch's window sits far back in newest-first curve history."""
+    assert resolve_max_pages(None, 'L' * 64) == NAMED_LAUNCH_PAGES
+    assert resolve_max_pages(None, None) == DISCOVERY_PAGES
+    assert resolve_max_pages(7, 'L' * 64) == 7
+    assert NAMED_LAUNCH_PAGES > DISCOVERY_PAGES
+
+
+def test_main_uses_the_deeper_depth_for_a_named_launch(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setenv('SOLANA_RPC_URL', SECRET_URL)
+    monkeypatch.setattr(sys, 'argv', ['pump_evidence.py', '--launch-signature', 'L' * 64,
+                                      '--output', str(tmp_path / 'o.json'),
+                                      '--no-annotations'])
+    monkeypatch.setattr(pump_evidence, 'fetch_transaction', lambda url, sig: {})
+    monkeypatch.setattr(pump_evidence, 'parse_launch', lambda tx: launch())
+
+    def stub(url, lch, max_pages=0, page_size=0):
+        seen['max_pages'] = max_pages
+        return sample(buys=[])
+
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys', stub)
+    assert pump_evidence.main() == 0
+    assert seen['max_pages'] == NAMED_LAUNCH_PAGES
+
+
+def test_explicit_max_pages_override_is_honoured(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setenv('SOLANA_RPC_URL', SECRET_URL)
+    monkeypatch.setattr(sys, 'argv', ['pump_evidence.py', '--launch-signature', 'L' * 64,
+                                      '--max-pages', '2', '--output', str(tmp_path / 'o.json'),
+                                      '--no-annotations'])
+    monkeypatch.setattr(pump_evidence, 'fetch_transaction', lambda url, sig: {})
+    monkeypatch.setattr(pump_evidence, 'parse_launch', lambda tx: launch())
+
+    def stub(url, lch, max_pages=0, page_size=0):
+        seen['max_pages'] = max_pages
+        return sample(buys=[])
+
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys', stub)
+    assert pump_evidence.main() == 0
+    assert seen['max_pages'] == 2

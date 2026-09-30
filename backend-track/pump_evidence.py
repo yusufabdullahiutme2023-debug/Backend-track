@@ -43,6 +43,12 @@ from pump_replay import PUMP_PROGRAM, fetch_transaction, parse_launch
 # this module can produce that attestation, so the claim stays unavailable.
 FIRST_N_BUYERS = 50
 
+# Bonding-curve history is newest-first. A launch that is minutes old has its
+# window far back in that history, so four pages would never reach it; a
+# discovered launch is seconds old and its window is at the very front.
+DISCOVERY_PAGES = 4
+NAMED_LAUNCH_PAGES = 20
+
 BUYS_OBSERVED = 'buys_observed'
 NO_BUYS_IN_WINDOW = 'no_buys_in_window'
 COVERAGE_PROVEN = 'coverage_proven'
@@ -348,6 +354,13 @@ def annotation_lines(report, max_lines=12, max_chars=480) -> list[str]:
     return [redact(line)[:max_chars] for line in lines]
 
 
+def resolve_max_pages(explicit, launch_signature) -> int:
+    """Pagination depth: a named launch needs to reach further back in history."""
+    if explicit:
+        return explicit
+    return NAMED_LAUNCH_PAGES if launch_signature else DISCOVERY_PAGES
+
+
 def launches_from_report(path, limit) -> list[str]:
     """Bounded list of already-validated launch signatures from a sampler report."""
     with open(path) as handle:
@@ -404,7 +417,9 @@ def main() -> int:
                         help='Sampler report JSON to draw candidate launches from')
     parser.add_argument('--max-launches', type=int, default=3,
                         help='Bound on how many candidate launches to evaluate')
-    parser.add_argument('--max-pages', type=int, default=4)
+    parser.add_argument('--max-pages', type=int, default=None,
+                        help='Bonding-curve history pages of 100 signatures each '
+                             '(default 20 for a named launch, 4 when discovering)')
     parser.add_argument('--page-size', type=int, default=100)
     parser.add_argument('--output', default='pump-evidence.json')
     parser.add_argument('--no-annotations', action='store_true')
@@ -412,13 +427,14 @@ def main() -> int:
     url = os.environ.get('SOLANA_RPC_URL')
     if not url:
         parser.error('Set SOLANA_RPC_URL privately; never paste a key on the command line.')
+    max_pages = resolve_max_pages(args.max_pages, args.launch_signature)
     try:
         signatures = ([args.launch_signature] if args.launch_signature
                       else launches_from_report(args.from_report, args.max_launches)
                       if args.from_report else [])
         if signatures:
             reports = evaluate_candidates(url, signatures[:args.max_launches],
-                                          args.max_pages, args.page_size)
+                                          max_pages, args.page_size)
             report = select_report(reports)
             if report is None:
                 raise ValueError(
@@ -432,7 +448,7 @@ def main() -> int:
             if launch is None:
                 raise ValueError('no verified Pump.fun creation in the bounded sample: '
                                  + json.dumps(diagnostics))
-            report = finalize(collect_evidence(url, launch, max_pages=args.max_pages,
+            report = finalize(collect_evidence(url, launch, max_pages=max_pages,
                                                page_size=args.page_size))
             report['discovery'] = diagnostics
     except ValueError as exc:
