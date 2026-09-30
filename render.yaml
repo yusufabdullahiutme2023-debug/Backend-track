@@ -1,0 +1,19 @@
+# Dedicated read-only watcher. This Blueprint does NOT replace the existing web API.
+# Creating this service starts paid compute; review costs and Helius quota first.
+services:
+  - type: worker
+    name: backend-track-pump-worker
+    runtime: python
+    branch: arena/01a0ed1a-backend-track
+    rootDir: backend-track
+    region: frankfurt
+    plan: 0.5c-512mb
+    numInstances: 1
+    autoDeployTrigger: 'off'
+    buildCommand: pip install -r requirements.txt
+    startCommand: python pump_worker.py
+    envVars:
+      - key: SOLANA_RPC_URL
+        sync: false
+      - key: DATABASE_URL
+        sync: false

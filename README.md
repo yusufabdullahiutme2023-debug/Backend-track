@@ -188,3 +188,30 @@ run it inside the web server or GitHub Actions: those are not persistent worker
 hosts. Monitor Helius credits and run reconciliation tests before deployment.
 Do not store the URL or credentials in Git or chat. If the worker encounters a
 history gap, investigate it; do not reset the cursor to hide missing events.
+
+#### Persistent worker hosting (Render Blueprint)
+
+`render.yaml` describes a **separate**, one-instance background worker in
+Frankfurt using the 0.5c-512mb plan. It is not the existing FastAPI web
+service. Automatic deploys are disabled; deploy deliberately after changes.
+Render currently lists that worker compute tier at **$7/month**, plus any
+third-party API/database usage; check the Render confirmation screen for the
+actual charge before creating it. It is not provisioned by committing this file.
+
+In Render: **New → Blueprint → connect this GitHub repository → branch
+`arena/01a0ed1a-backend-track` → `render.yaml`**. Before approving the initial
+creation, set the prompted secrets directly in Render:
+
+- `SOLANA_RPC_URL`: Helius **Mainnet HTTPS RPC URL** (not WSS). Do not paste in
+  chat, Git, build logs, or a screenshot.
+- `DATABASE_URL`: your PostgreSQL/Neon connection string. This worker's
+  checkpoint tables are stored in that database, so it must persist across
+  deploys. Use the correct SSL configuration for your provider.
+
+The GitHub Actions secret `HELIUS_RPC_URL` is **not shared with Render**.
+The current worker only records program-confirmed launch transactions as
+`unscored`; it does not yet collect exhaustive buyers, trace funding, calculate
+50x PnL, or send alerts. Watch Helius credits and logs, especially retries and
+history-gap errors. Do not configure multiple instances: this worker does not
+implement multi-instance leader election. Stop the worker in Render if it is
+reconnecting repeatedly or using credits faster than expected.
