@@ -267,6 +267,19 @@ proven. The workflow surfaces the status as a `::warning::` annotation when
 incomplete, and still exits 0 — an unknown result is a finding, not a broken
 pipeline.
 
+**Bundled versus independent buys.** Pump.fun creations are frequently bundled
+with an initial buy in the *same* transaction. That is a real,
+instruction-verified buy, but it is not evidence of independent early demand, so
+the two are never counted together. Each buy carries
+`bundled_with_creation` (its signature equals the launch signature), and the
+report splits `bundled_buy_count` from `independent_buy_count` /
+`independent_wallet_count`. When every verified buy is bundled, the claim says
+plainly that no independent early buyer is evidenced yet.
+
+Verified against live mainnet: a run that found a single verified buy whose
+signature matched the launch signature is reported as one bundled buy and zero
+independent buyers, not as one early buyer.
+
 Findings are printed as `::notice::` annotations as well as JSON. Workflow
 artifacts live on Azure blob storage, which restricted networks cannot download;
 annotations stay readable through the public check-run annotations API:

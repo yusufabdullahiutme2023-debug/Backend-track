@@ -12,9 +12,7 @@ on:
     # can be delayed. Two 60-second samples per day, NOT live monitoring.
     - cron: '17 6,18 * * *'
   push:
-    # Branch push trigger: lets this branch be exercised without workflow_dispatch
-    # rights. Bounded by the same 60-second sample and RPC lookup cap.
-    branches: [arena/01a0ed1a-backend-track, arena/01a0f410-backend-track]
+    branches: [arena/01a0ed1a-backend-track]
     paths:
       - 'backend-track/pump_actions_sample.py'
       - 'backend-track/pump_evidence.py'
