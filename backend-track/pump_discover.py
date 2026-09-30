@@ -22,15 +22,27 @@ def rpc(url, method, params):
 
 
 def discover(url, limit=40):
-    program_signatures = rpc(url, 'getSignaturesForAddress',
-                             [PUMP_PROGRAM, {'limit': limit, 'commitment': 'confirmed'}])
+    try:
+        program_signatures = rpc(url, 'getSignaturesForAddress',
+                                 [PUMP_PROGRAM, {'limit': limit, 'commitment': 'confirmed'}])
+    except ValueError as exc:
+        raise ValueError('program signature lookup failed') from exc
+    print(f'Program signatures sampled: {len(program_signatures)}', file=sys.stderr)
+    unavailable = 0
     for item in program_signatures:
-        tx = fetch_transaction(url, item['signature'])
+        try:
+            tx = fetch_transaction(url, item['signature'])
+        except ValueError:
+            unavailable += 1
+            continue
         launch = parse_launch(tx)
         if not launch:
             continue
-        curve_signatures = rpc(url, 'getSignaturesForAddress',
-                               [launch.pool, {'limit': 100, 'commitment': 'confirmed'}])
+        try:
+            curve_signatures = rpc(url, 'getSignaturesForAddress',
+                                   [launch.pool, {'limit': 100, 'commitment': 'confirmed'}])
+        except ValueError as exc:
+            raise ValueError('bonding curve signature lookup failed') from exc
         early = [s for s in curve_signatures if launch.slot <= s['slot'] <= launch.end_slot]
         early.sort(key=lambda s: s['slot'])
         buys = []
@@ -42,7 +54,8 @@ def discover(url, limit=40):
             'sampled_verified_buys': [b.model_dump() for b in buys],
             'buyers_complete': False,  # bounded RPC sampling is not exhaustive
         }
-    raise ValueError('No creation in bounded program sample; retry later')
+    raise ValueError(f'No creation in {len(program_signatures)} sampled signatures; '
+                     f'{unavailable} transactions unavailable')
 
 
 if __name__ == '__main__':
@@ -52,6 +65,10 @@ if __name__ == '__main__':
     try:
         print(json.dumps(discover(url), indent=2))
     except (ValueError, KeyError, IndexError, OSError) as error:
-        # Never include error details: transport errors may contain the private URL.
-        print(f'Historical sample failed ({type(error).__name__}); no live claim.', file=sys.stderr)
+        # Only our own explicitly generated messages are safe to print. Transport
+        # exceptions and RPC payloads might contain the private provider URL.
+        safe = str(error) if isinstance(error, ValueError) and str(error).startswith(
+            ('program signature lookup failed', 'bonding curve signature lookup failed',
+             'No creation in ')) else type(error).__name__
+        print(f'Historical sample failed: {safe}; no live claim.', file=sys.stderr)
         sys.exit(1)
