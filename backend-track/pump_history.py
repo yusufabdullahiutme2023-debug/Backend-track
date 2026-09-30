@@ -38,14 +38,19 @@ def collect_early_buys(url, launch, max_pages=8, page_size=100):
     ordered = sorted(early, key=lambda s: (early[s], s))
     buys = []
     missing = 0
-    for signature in ordered[:100]:
+    attempted = ordered[:100]
+    for signature in attempted:
         try:
             buys.extend(parse_buys(fetch_transaction(url, signature), launch))
         except ValueError:
             missing += 1
     # Even reaching launch doesn't prove no missing transactions / same-slot
     # ordering. This flag represents only pagination coverage, not full buyers.
+    # transactions_attempted records the decode budget actually spent, so callers
+    # can tell "we decoded everything in the window" from "we stopped early".
     return {'buys': [b.model_dump() for b in buys], 'pages_scanned': pages,
-            'early_signatures_seen': len(ordered), 'unavailable_transactions': missing,
+            'early_signatures_seen': len(ordered), 'transactions_attempted': len(attempted),
+            'unavailable_transactions': missing,
             'reached_launch_slot': reached_launch,
+            'independent_block_verified': False,
             'buyers_complete': False}  # full coverage needs independent block verification
