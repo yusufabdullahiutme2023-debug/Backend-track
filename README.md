@@ -215,3 +215,16 @@ The current worker only records program-confirmed launch transactions as
 history-gap errors. Do not configure multiple instances: this worker does not
 implement multi-instance leader election. Stop the worker in Render if it is
 reconnecting repeatedly or using credits faster than expected.
+
+#### No-card, bounded GitHub Actions research
+
+`.github/workflows/solana-research.yml` uses the existing GitHub Actions
+`HELIUS_RPC_URL` secret to listen for **60 seconds twice daily** (06:17 and
+18:17 UTC), with at most eight on-chain transaction lookups per run. It retains
+a public-evidence JSON artifact for seven days. It never uses a wallet, places
+orders, writes to Neon, or claims first-buyer coverage. A quiet sample (zero
+launches) is a valid result, **not** evidence that no launches occurred.
+Actions schedules can be delayed or skipped and run only from the repository's
+**default branch**. The workflow on the Arena branch can be push-tested now;
+the schedule will not activate until the code is reviewed and merged into the
+default branch. Do not mistake these short snapshots for persistent hosting.
