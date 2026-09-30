@@ -14,8 +14,9 @@ from pump_evidence import (BUYS_OBSERVED, COVERAGE_PROVEN, EXIT_LAUNCH_UNKNOWN,
                            FIRST_N_BUYERS, NO_BUYS_IN_WINDOW, UNKNOWN_INCOMPLETE,
                            UNKNOWN_PHRASE, annotation_lines,
                            assert_no_unproven_first_n_claim, assert_no_unproven_zero_claim,
-                           collect_evidence, coverage_proven, early_buyer_claim, finalize,
-                           find_launch, launch_time_reachable, redact)
+                           collect_evidence, coverage_proven, early_buyer_claim, evaluate_candidates,
+                           finalize, find_launch, launch_time_reachable,
+                           launches_from_report, redact, select_report)
 from solana_signals import Launch
 
 SECRET_URL = 'https://mainnet.helius-rpc.com/?api-key=SUPERSECRETKEY'
@@ -238,7 +239,9 @@ def test_annotations_never_leak_the_provider_url_or_key():
               'evidence_status': 'buys_observed', 'buyer_count_known': False,
               'claim': f'the provider was {SECRET_URL}',
               'coverage': {'coverage_proven': False, 'reached_launch_slot': False,
-                           'unavailable_transactions': 0, 'missing_data': []}}
+                           'unavailable_transactions': 0, 'missing_data': [],
+                           'early_signatures_seen': 1, 'transactions_attempted': 1,
+                           'transactions_fetched': 1}}
     text = '\n'.join(annotation_lines(leaked))
     assert 'SUPERSECRETKEY' not in text
     assert 'redacted' in text
@@ -417,3 +420,81 @@ def test_main_writes_a_report_for_any_evidence_status(monkeypatch, capsys, tmp_p
     assert report['buyer_count_known'] is False
     captured = capsys.readouterr()
     assert f'::warning::Evidence status: {UNKNOWN_INCOMPLETE}' in captured.out
+
+
+# ------------------------- reachable window with no verified buy (run #5 case)
+
+def test_readable_window_without_buys_does_not_claim_unreachable_data(monkeypatch):
+    """Regression from live run #5: reached_launch_slot=true contradicted the claim."""
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[], seen=2, attempted=2))
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    assert report['evidence_status'] == UNKNOWN_INCOMPLETE
+    assert report['coverage']['reached_launch_slot'] is True
+    assert report['coverage']['unreachable_reasons'] == []
+    assert 'launch window was readable' in report['claim']
+    assert '2 in-window transaction(s) were decoded' in report['claim']
+    # The old fallback contradicted reached_launch_slot and is gone for good.
+    assert 'no reachable launch-time data' not in report['claim']
+    assert 'zero buyers' not in report['claim'].replace('NOT "zero buyers"', '')
+
+
+def test_unreachable_reason_text_is_kept_when_data_really_is_unreadable(monkeypatch):
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[], seen=0, attempted=0))
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    assert report['coverage']['unreachable_reasons']
+    assert 'could not be fully read' in report['claim']
+    assert 'launch window was readable' not in report['claim']
+
+
+def test_status_annotation_carries_the_coverage_counters(monkeypatch):
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[], seen=7, attempted=5, unavailable=2))
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    status_line = annotation_lines(report)[1]
+    assert 'signatures_seen=7' in status_line
+    assert 'tx_attempted/fetched=5/3' in status_line
+    assert 'unavailable=2' in status_line
+
+
+# ------------------------------------------------------ bounded multi-launch
+
+def test_launches_from_report_is_bounded_and_skips_malformed_entries(tmp_path):
+    path = tmp_path / 'pump-report.json'
+    path.write_text(json.dumps({'validated_launches':
+                                [{'signature': f's{i}'} for i in range(10)] + ['junk', {}]}))
+    assert launches_from_report(path, 3) == ['s0', 's1', 's2']
+    assert launches_from_report(path, 0) == []
+
+
+def test_evaluate_candidates_stops_at_the_first_launch_with_a_verified_buy(monkeypatch):
+    evaluated = []
+    monkeypatch.setattr(pump_evidence, 'fetch_transaction', lambda url, sig: {'signature': sig})
+    monkeypatch.setattr(pump_evidence, 'parse_launch',
+                        lambda tx: None if tx['signature'] == 'bad' else launch())
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda url, lch, **kw: evaluated.append(lch) or sample(buys=[buy()]))
+    reports = evaluate_candidates('private', ['bad', 'good1', 'good2'], 4, 100)
+    assert len(reports) == 1
+    assert len(evaluated) == 1
+    assert reports[0]['verified_buy_count'] == 1
+    assert reports[0]['discovery']['signature'] == 'good1'
+
+
+def test_evaluate_candidates_exhausts_the_bounded_list_when_no_buy_is_found(monkeypatch):
+    monkeypatch.setattr(pump_evidence, 'fetch_transaction', lambda url, sig: {'signature': sig})
+    monkeypatch.setattr(pump_evidence, 'parse_launch', lambda tx: launch())
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys', lambda *a, **kw: sample(buys=[]))
+    reports = evaluate_candidates('private', ['a', 'b', 'c'], 4, 100)
+    assert len(reports) == 3
+    assert all(r['evidence_status'] == UNKNOWN_INCOMPLETE for r in reports)
+
+
+def test_select_report_prefers_buys_then_the_most_decoded_window():
+    few = {'verified_buy_count': 0, 'coverage': {'transactions_fetched': 1}}
+    many = {'verified_buy_count': 0, 'coverage': {'transactions_fetched': 9}}
+    with_buys = {'verified_buy_count': 2, 'coverage': {'transactions_fetched': 1}}
+    assert select_report([many, with_buys]) is with_buys
+    assert select_report([few, many]) is many
+    assert select_report([]) is None

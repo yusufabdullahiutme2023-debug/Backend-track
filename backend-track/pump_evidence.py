@@ -214,11 +214,21 @@ def early_buyer_claim(report) -> str:
     span = f'slots {slots[0]}-{slots[-1]}' if slots else 'no slots observed'
 
     if status == UNKNOWN_INCOMPLETE:
-        reasons = '; '.join(coverage['unreachable_reasons']) or 'no reachable launch-time data'
-        return (f'{UNKNOWN_PHRASE}: the launch-time transactions could not be fully read, '
-                f'so the number of early buyers is UNKNOWN. This is NOT "zero buyers" and '
-                f'NOT a first-{FIRST_N_BUYERS} buyer list. Verified buys in the reachable '
-                f'subset: {len(buys)}. Reasons: {reasons}')
+        reasons = coverage['unreachable_reasons']
+        if reasons:
+            return (f'{UNKNOWN_PHRASE}: the launch-time transactions could not be fully read, '
+                    f'so the number of early buyers is UNKNOWN. This is NOT "zero buyers" and '
+                    f'NOT a first-{FIRST_N_BUYERS} buyer list. Verified buys in the reachable '
+                    f'subset: {len(buys)}. Reasons: ' + '; '.join(reasons))
+        # The window WAS readable; we simply found no verified buy in it, and
+        # coverage is unproven. Saying "no reachable data" here would contradict
+        # reached_launch_slot, and saying "zero buyers" would be a false negative.
+        return (f'{UNKNOWN_PHRASE}: the launch window was readable and '
+                f"{coverage['transactions_attempted']} in-window transaction(s) were decoded, "
+                f'but no verified buy was found among them. Coverage is not proven, so the '
+                f'number of early buyers is UNKNOWN — buys may sit in transactions that were '
+                f'never decoded or in same-slot transactions we cannot order. This is NOT '
+                f'"zero buyers" and NOT a first-{FIRST_N_BUYERS} buyer list.')
     if status == COVERAGE_PROVEN:
         return (f'{count} distinct early buyers verified across {len(buys)} buy transactions '
                 f'({span}); coverage independently verified')
@@ -281,8 +291,10 @@ def annotation_lines(report, max_lines=12, max_chars=480) -> list[str]:
         f"slot={launch['slot']} signature={launch['signature']}",
         f"::{status_level}::Evidence status: {status}; buyer_count_known="
         f"{str(report['buyer_count_known']).lower()}; verified_buys="
-        f"{report['verified_buy_count']}; reached_launch_slot="
-        f"{str(coverage['reached_launch_slot']).lower()}; unavailable="
+        f"{report['verified_buy_count']}; signatures_seen="
+        f"{coverage['early_signatures_seen']}; tx_attempted/fetched="
+        f"{coverage['transactions_attempted']}/{coverage['transactions_fetched']}; "
+        f"reached_launch_slot={str(coverage['reached_launch_slot']).lower()}; unavailable="
         f"{coverage['unavailable_transactions']}",
         f"::{status_level}::Claim: {report['claim']}",
     ]
@@ -302,11 +314,62 @@ def annotation_lines(report, max_lines=12, max_chars=480) -> list[str]:
     return [redact(line)[:max_chars] for line in lines]
 
 
+def launches_from_report(path, limit) -> list[str]:
+    """Bounded list of already-validated launch signatures from a sampler report."""
+    with open(path) as handle:
+        data = json.load(handle)
+    signatures = []
+    for item in (data.get('validated_launches') or [])[:max(limit, 0)]:
+        signature = item.get('signature') if isinstance(item, dict) else None
+        if signature:
+            signatures.append(signature)
+    return signatures
+
+
+def evaluate_candidates(url, signatures, max_pages, page_size):
+    """Evaluate launches in order, stopping at the first with a verified buy.
+
+    A brand-new launch often has no decodable buy yet, so giving up after one
+    candidate reports unknown/incomplete far more often than the data warrants.
+    Bounded by the caller-supplied signature list.
+    """
+    reports = []
+    for signature in signatures:
+        try:
+            launch = parse_launch(fetch_transaction(url, signature))
+        except ValueError:
+            continue
+        if launch is None:
+            continue
+        report = finalize(collect_evidence(url, launch, max_pages=max_pages,
+                                           page_size=page_size))
+        report['discovery'] = {'source': 'candidate signature', 'signature': signature}
+        reports.append(report)
+        if report['verified_buy_count'] > 0:
+            break
+    return reports
+
+
+def select_report(reports) -> dict | None:
+    """Prefer a report with verified buys; otherwise the most informative one."""
+    if not reports:
+        return None
+    for report in reports:
+        if report['verified_buy_count'] > 0:
+            return report
+    return max(reports, key=lambda r: (r['coverage']['transactions_fetched'],
+                                       r['verified_buy_count']))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description='Read-only early-buyer evidence for one verified Pump.fun launch')
     parser.add_argument('--launch-signature', default=None,
-                        help='Optional known create/create_v2 signature')
+                        help='Known create/create_v2 signature to validate')
+    parser.add_argument('--from-report', default=None,
+                        help='Sampler report JSON to draw candidate launches from')
+    parser.add_argument('--max-launches', type=int, default=3,
+                        help='Bound on how many candidate launches to evaluate')
     parser.add_argument('--max-pages', type=int, default=4)
     parser.add_argument('--page-size', type=int, default=100)
     parser.add_argument('--output', default='pump-evidence.json')
@@ -316,16 +379,28 @@ def main() -> int:
     if not url:
         parser.error('Set SOLANA_RPC_URL privately; never paste a key on the command line.')
     try:
-        if args.launch_signature:
-            launch = parse_launch(fetch_transaction(url, args.launch_signature))
-            diagnostics = {'source': 'supplied signature'}
-            if launch is None:
-                raise ValueError('supplied signature is not a verified Pump.fun creation')
+        signatures = ([args.launch_signature] if args.launch_signature
+                      else launches_from_report(args.from_report, args.max_launches)
+                      if args.from_report else [])
+        if signatures:
+            reports = evaluate_candidates(url, signatures[:args.max_launches],
+                                          args.max_pages, args.page_size)
+            report = select_report(reports)
+            if report is None:
+                raise ValueError(
+                    f'none of {len(signatures)} candidate signature(s) verified as a '
+                    'Pump.fun creation')
+            report['launches_tried'] = len(reports)
+            report['launches_with_verified_buys'] = sum(
+                1 for r in reports if r['verified_buy_count'] > 0)
         else:
             launch, diagnostics = find_launch(url)
             if launch is None:
                 raise ValueError('no verified Pump.fun creation in the bounded sample: '
                                  + json.dumps(diagnostics))
+            report = finalize(collect_evidence(url, launch, max_pages=args.max_pages,
+                                               page_size=args.page_size))
+            report['discovery'] = diagnostics
     except ValueError as exc:
         # The launch itself is unknown. Say so explicitly rather than exiting
         # with a bare failure that could be read as "no launch happened".
@@ -333,13 +408,8 @@ def main() -> int:
               f'({redact(str(exc))})')
         print(redact(f'Launch verification failed: {exc}'), file=sys.stderr)
         return EXIT_LAUNCH_UNKNOWN
-    try:
-        report = finalize(collect_evidence(url, launch, max_pages=args.max_pages,
-                                           page_size=args.page_size))
-        report['discovery'] = diagnostics
-    except (ValueError, KeyError, IndexError, OSError) as exc:
-        # Transport errors can embed the provider URL and its API key.
-        safe = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+    except (KeyError, IndexError, OSError) as exc:
+        safe = str(exc) if isinstance(exc, (KeyError, IndexError)) else type(exc).__name__
         print(f'::warning::Evidence status: {UNKNOWN_INCOMPLETE}; buyer history unreadable')
         print(redact(f'Evidence collection failed: {safe}'), file=sys.stderr)
         return EXIT_LAUNCH_UNKNOWN

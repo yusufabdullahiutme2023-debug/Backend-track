@@ -77,29 +77,27 @@ jobs:
             echo 'Missing HELIUS_RPC_URL repository Actions secret' >&2
             exit 1
           fi
-          if [ -z "$LAUNCH_SIGNATURE" ]; then
-            LAUNCH_SIGNATURE=$(python - <<'PY'
-          import json
-          data = json.load(open('pump-report.json'))
-          launches = data['validated_launches']
-          print(launches[0]['signature'] if launches else '')
-          PY
-          )
-          fi
-          if [ -z "$LAUNCH_SIGNATURE" ]; then
+          if [ -z "$LAUNCH_SIGNATURE" ] && ! grep -q '"signature"' pump-report.json 2>/dev/null; then
             # A quiet sample is missing data. It is never a finding that no
             # launches or no buyers existed.
-            echo '::warning::Evidence status: unknown/incomplete; no verified launch in this bounded sample, so buyer coverage is unknown'
+            echo '::warning::Evidence status: unknown/incomplete; the bounded sample validated no launch, so buyer coverage is unknown'
             exit 0
           fi
+          if [ -n "$LAUNCH_SIGNATURE" ]; then
+            ARGS="--launch-signature $LAUNCH_SIGNATURE"
+          else
+            # A launch that is seconds old often has no decodable buy yet, so
+            # evaluate a bounded set of candidates rather than only the first.
+            ARGS="--from-report pump-report.json --max-launches 3"
+          fi
           set +e
-          python pump_evidence.py --launch-signature "$LAUNCH_SIGNATURE" --output pump-evidence.json
+          python pump_evidence.py $ARGS --output pump-evidence.json
           status=$?
           set -e
           if [ ! -f pump-evidence.json ]; then
             # Unreachable launch-time data is unknown/incomplete, which must not
             # be reported as a green run that silently found nothing.
-            echo "::warning::Evidence status: unknown/incomplete; no evidence collected for $LAUNCH_SIGNATURE (exit $status)"
+            echo "::warning::Evidence status: unknown/incomplete; no evidence collected (exit $status)"
             exit 0
           fi
           python - <<'PY'
