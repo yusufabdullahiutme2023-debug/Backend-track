@@ -1,0 +1,42 @@
+name: Profile Bitquery Pump.fun sample
+
+# Read-only. Downloads one public Parquet file and inspects it: no secrets, no RPC
+# provider, no writes, nothing signed or sent. Artifact blobs live on Azure storage
+# that restricted networks cannot download, so the profile is mirrored into check-run
+# annotations instead (see the README section on retrieving a run's findings).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [arena/01a0f47f-backend-track]
+    paths:
+      - 'backend-track/pump_dataset.py'
+      - '.github/workflows/bitquery-profile.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pyarrow
+        run: python -m pip install 'pyarrow>=18,<25'
+      - name: Profile the public sample and scan which days are public
+        working-directory: backend-track
+        run: python pump_dataset.py profile --scan 2026-06-01:2026-09-29
+      # Actions keeps at most ten notices per step, so the mirror is split in three.
+      - name: Mirror profile into annotations (1 of 3)
+        working-directory: backend-track
+        run: python pump_dataset.py annotate pump-dataset-profile.json --part 1 --parts 3
+      - name: Mirror profile into annotations (2 of 3)
+        working-directory: backend-track
+        run: python pump_dataset.py annotate pump-dataset-profile.json --part 2 --parts 3
+      - name: Mirror profile into annotations (3 of 3)
+        working-directory: backend-track
+        run: python pump_dataset.py annotate pump-dataset-profile.json --part 3 --parts 3
