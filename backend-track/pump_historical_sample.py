@@ -27,6 +27,7 @@ def validate(rpc_url):
         raise ValueError('Public sample lacks required provenance columns')
     candidates = table.select(['Transaction_Signature', 'Instruction_Program_Method']).to_pylist()
     sampled = 0
+    first_verified = None
     for row in candidates:
         if row['Instruction_Program_Method'] not in ('create', 'create_v2'):
             continue
@@ -34,7 +35,7 @@ def validate(rpc_url):
         if not isinstance(sig, str) or len(sig) < 64:
             continue
         sampled += 1
-        if sampled > 6:
+        if sampled > 4:
             break
         try:
             launch = parse_launch(fetch_transaction(rpc_url, sig))
@@ -44,20 +45,27 @@ def validate(rpc_url):
             continue
         # Creation is independently verified; buyer coverage is ALWAYS partial.
         try:
-            sample = collect_early_buys(rpc_url, launch)
+            sample = collect_early_buys(rpc_url, launch, max_pages=4)
             buys = sample['buys']
             state = 'sampled buys verified' if buys else 'no qualifying buys in bounded sample'
         except ValueError:
             sample = {'early_signatures_seen': 0, 'pages_scanned': 0,
                       'reached_launch_slot': False, 'unavailable_transactions': 0}
             buys, state = [], 'curve history unavailable'
-        return {'validated_launch': launch.model_dump(), 'creation_candidates_checked': sampled,
-                'sampled_curve_signatures': sample['early_signatures_seen'],
-                'pages_scanned': sample['pages_scanned'],
-                'reached_launch_slot': sample['reached_launch_slot'],
-                'unavailable_transactions': sample['unavailable_transactions'],
-                'validated_buys': buys, 'buyer_validation': state,
-                'buyers_complete': False, 'source': 'public dataset + RPC'}
+        result = {'validated_launch': launch.model_dump(), 'creation_candidates_checked': sampled,
+                  'sampled_curve_signatures': sample['early_signatures_seen'],
+                  'pages_scanned': sample['pages_scanned'],
+                  'reached_launch_slot': sample['reached_launch_slot'],
+                  'unavailable_transactions': sample['unavailable_transactions'],
+                  'validated_buys': buys, 'buyer_validation': state,
+                  'buyers_complete': False, 'source': 'public dataset + RPC'}
+        if buys:
+            return result
+        if first_verified is None:
+            first_verified = result
+    if first_verified:
+        first_verified['creation_candidates_checked'] = sampled
+        return first_verified
     raise ValueError(f'No RPC-verified launch among {sampled} historical candidates')
 
 

@@ -43,7 +43,11 @@ jobs:
           print('::notice::Verified historical launch: ' + entry['signature'] +
                 ' mint=' + entry['mint'] + ' slot=' + str(entry['slot']) +
                 ' sampled_buy_count=' + str(len(buys)) +
-                ' buyer_validation=' + result['buyer_validation'])
+                ' buyer_validation=' + result['buyer_validation'] +
+                ' pages=' + str(result['pages_scanned']) +
+                ' early_signatures=' + str(result['sampled_curve_signatures']) +
+                ' reached_launch=' + str(result['reached_launch_slot']) +
+                ' unavailable=' + str(result['unavailable_transactions']))
           for buy in buys[:3]:
               print('::notice::Verified sampled buy: ' + buy['signature'] +
                     ' wallet=' + buy['wallet'] + ' slot=' + str(buy['slot']))
