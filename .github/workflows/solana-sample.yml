@@ -27,4 +27,15 @@ jobs:
             echo 'Missing HELIUS_RPC_URL Actions secret' >&2
             exit 1
           fi
-          python pump_discover.py
+          set +e
+          python pump_discover.py > replay-result.txt 2>&1
+          result=$?
+          cat replay-result.txt
+          {
+            echo '### Bounded Pump.fun replay'
+            echo '```text'
+            cat replay-result.txt
+            echo '```'
+            echo "Exit status: $result"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
