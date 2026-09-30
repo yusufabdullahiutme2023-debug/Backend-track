@@ -1,4 +1,4 @@
-name: Sample real Pump.fun transactions
+name: Validate historical Pump.fun creation
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install decoder requirements
-        run: python -m pip install 'pydantic==2.13.5'
+        run: python -m pip install 'pydantic==2.13.5' 'pyarrow>=18,<25'
       - name: Bounded read-only RPC sample
         working-directory: backend-track
         env:
@@ -28,7 +28,7 @@ jobs:
             exit 1
           fi
           set +e
-          python pump_discover.py > replay-result.txt 2>&1
+          python pump_historical_sample.py > replay-result.txt 2>&1
           result=$?
           cat replay-result.txt
           if [ "$result" -ne 0 ]; then
