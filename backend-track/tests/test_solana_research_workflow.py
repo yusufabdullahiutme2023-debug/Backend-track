@@ -137,3 +137,11 @@ def test_push_paths_cover_every_script_the_workflow_executes():
     for script in ('backend-track/pump_actions_sample.py', 'backend-track/pump_evidence.py'):
         assert script in paths, f'{script} is executed by this workflow but not watched'
     assert '.github/workflows/solana-research.yml' in paths
+
+
+def test_workflow_is_on_demand_with_no_schedule():
+    """A timed sample spends provider credits whether or not anyone reads it."""
+    triggers = SPEC.get('on', SPEC.get(True))
+    assert 'schedule' not in triggers
+    assert 'cron' not in TEXT
+    assert 'workflow_dispatch' in triggers

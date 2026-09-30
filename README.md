@@ -219,15 +219,25 @@ reconnecting repeatedly or using credits faster than expected.
 #### No-card, bounded GitHub Actions research
 
 `.github/workflows/solana-research.yml` uses the existing GitHub Actions
-`HELIUS_RPC_URL` secret to listen for **60 seconds twice daily** (06:17 and
-18:17 UTC), with at most eight on-chain transaction lookups per run. It retains
-a public-evidence JSON artifact for seven days. It never uses a wallet, places
-orders, writes to Neon, or claims first-buyer coverage. A quiet sample (zero
-launches) is a valid result, **not** evidence that no launches occurred.
-Actions schedules can be delayed or skipped and run only from the repository's
-**default branch**. The workflow on the Arena branch can be push-tested now;
-the schedule will not activate until the code is reviewed and merged into the
-default branch. Do not mistake these short snapshots for persistent hosting.
+`HELIUS_RPC_URL` secret to listen for **60 seconds on demand**, with at most
+eight on-chain transaction lookups per run. It retains a public-evidence JSON
+artifact for seven days. It never uses a wallet, places orders, writes to Neon,
+or claims first-buyer coverage. A quiet sample (zero launches) is a valid
+result, **not** evidence that no launches occurred.
+
+There is deliberately **no schedule**. A timed sample spends provider credits
+whether or not anyone reads the output, and a bounded 60-second snapshot is
+worth far more when aimed at a launch whose history has settled. Trigger it with
+`Run workflow`, optionally passing a specific `launch_signature`:
+
+```bash
+gh workflow run 371464611 --ref main -f launch_signature=<create-tx-signature>
+```
+
+Prefer a launch that is several minutes old. A creation that is seconds old
+usually has almost no bonding-curve history yet and may not be indexed, which
+produces `unknown_incomplete` far more often than the data warrants. Do not
+mistake these short snapshots for persistent hosting.
 
 #### Early-buyer evidence and retrieving a run's findings
 

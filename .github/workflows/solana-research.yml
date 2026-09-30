@@ -1,16 +1,15 @@
 name: Bounded Solana launch research
 
 on:
+  # On demand only. There is deliberately no schedule: a timed sample spends
+  # provider credits whether or not anyone reads the result, and a bounded
+  # 60-second snapshot is worth far more when aimed at a specific launch.
   workflow_dispatch:
     inputs:
       launch_signature:
         description: 'Optional known create/create_v2 signature to validate buyers for (leave empty to discover one)'
         required: false
         type: string
-  schedule:
-    # GitHub runs scheduled workflows ONLY on the default branch, and timing
-    # can be delayed. Two 60-second samples per day, NOT live monitoring.
-    - cron: '17 6,18 * * *'
   push:
     branches: [arena/01a0ed1a-backend-track]
     paths:
