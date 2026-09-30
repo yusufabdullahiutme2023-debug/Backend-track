@@ -44,6 +44,8 @@ jobs:
           python - <<'PY'
           import json, os
           data = json.load(open('pump-report.json'))
+          print(f"::notice::Bounded research: validated={len(data['validated_launches'])} "
+                f"candidates={data['candidates']} unavailable={data['unavailable_transactions']}")
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write('### Bounded Solana research (NOT live)\n')
               f.write(f"Validated launches: {len(data['validated_launches'])}; "
