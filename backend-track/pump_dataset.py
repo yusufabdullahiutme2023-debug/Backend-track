@@ -46,6 +46,7 @@ SLOT = 'Block_Slot'
 TIME = 'Block_Time'
 SUCCESS = 'Transaction_Result_Success'
 TRUNK = 'Indexing_OnTrunk'
+USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 COLUMNS = (SIGNATURE, SIGNER, METHOD, MINT, NAME, CREATORS, SYMBOL, DECIMALS,
            FUNGIBLE, URI, QUOTE_MINT, QUOTE_NAME, SLOT, TIME, SUCCESS, TRUNK)
 
@@ -178,6 +179,7 @@ def creations_section(rows, raw, pfile, table):
         'fungible': _counts(r.get(FUNGIBLE) for r in good),
         'quote_mint': _counts((r.get(QUOTE_MINT) for r in good), 5),
         'quote_name': _counts((r.get(QUOTE_NAME) for r in good), 5),
+        'quote_by_method': _counts(f'{r.get(METHOD)}|{r.get(QUOTE_NAME)}' for r in good),
         'name_length': _spread(len(r[NAME]) for r in good if r.get(NAME)),
         'symbol_length': _spread(len(r[SYMBOL]) for r in good if r.get(SYMBOL)),
         'uri_prefix': _counts((r[URI][:30] for r in good if r.get(URI)), 6),
@@ -207,6 +209,14 @@ def migrations_section(rows, raw, pfile, table):
     }
 
 
+def _lag_bucket(lag):
+    for limit, label in ((0, '0 (same slot)'), (150, '1-150 (<1 min)'), (1500, '151-1500 (<10 min)'),
+                         (9000, '1501-9000 (<1 h)')):
+        if lag <= limit:
+            return label
+    return '>9000 (>1 h)'
+
+
 def funnel_section(rows, raw, pfile, table):
     """Launch-to-graduation pairs visible *within this one file* only."""
     created, migrated = {}, {}
@@ -226,10 +236,35 @@ def funnel_section(rows, raw, pfile, table):
         'migrated_without_creation_in_file': len(set(migrated) - set(created)),
         'migration_before_creation': sum(1 for lag in lags if lag < 0),
         'lag_slots': _spread(lags),
+        'lag_buckets': _counts(_lag_bucket(lag) for lag in lags),
         'examples': [{'mint': m, 'create_signature': created[m][SIGNATURE],
                       'migrate_signature': migrated[m][SIGNATURE],
                       'migrate_method': migrated[m][METHOD],
                       'lag_slots': migrated[m][SLOT] - created[m][SLOT]} for m in both[:3]],
+    }
+
+
+def migration_repeats_section(rows, raw, pfile, table):
+    """Successful migration rows grouped by mint: duplicates, or separate events?"""
+    by_mint = {}
+    for row in _with_method(rows, MIGRATE_METHODS):
+        if row.get(MINT):
+            by_mint.setdefault(row[MINT], []).append(row)
+    repeated = {m: v for m, v in by_mint.items() if len(v) > 1}
+    return {
+        'rows_per_mint': _counts(len(v) for v in by_mint.values()),
+        'repeated_mints': len(repeated),
+        'method_mix_of_repeats': _counts('+'.join(sorted(str(r.get(METHOD)) for r in v))
+                                         for v in repeated.values()),
+        'slot_span_of_repeats': _spread(max(r[SLOT] for r in v) - min(r[SLOT] for r in v)
+                                        for v in repeated.values()),
+        'repeats_with_one_signer': sum(1 for v in repeated.values()
+                                       if len({r.get(SIGNER) for r in v}) == 1),
+        'repeats_with_one_quote': sum(1 for v in repeated.values()
+                                      if len({r.get(QUOTE_MINT) for r in v}) == 1),
+        'examples': [{'mint': m, 'rows': [[r.get(METHOD), r.get(SLOT), str(r.get(SIGNATURE))[:12],
+                                          r.get(QUOTE_NAME)] for r in sorted(v, key=lambda r: r[SLOT])]}
+                     for m, v in sorted(repeated.items())[:3]],
     }
 
 
@@ -244,6 +279,8 @@ def samples_section(rows, raw, pfile, table):
     return {
         'creation': pick(lambda r: r.get(METHOD) in CREATE_METHODS and is_good(r)),
         'migration': pick(lambda r: r.get(METHOD) in MIGRATE_METHODS and is_good(r)),
+        'usdc_quote_creation': pick(lambda r: r.get(METHOD) in CREATE_METHODS and is_good(r)
+                                    and r.get(QUOTE_MINT) == USDC_MINT),
         'failed_transaction': pick(lambda r: r.get(SUCCESS) != 1),
         'off_trunk': pick(lambda r: r.get(TRUNK) != 1),
     }
@@ -270,7 +307,8 @@ SECTIONS = (
     ('file', file_section), ('schema', schema_section), ('methods', methods_section),
     ('keys', keys_section), ('ranges', ranges_section), ('nulls', nulls_section),
     ('creations', creations_section), ('migrations', migrations_section),
-    ('funnel', funnel_section), ('hourly', hourly_section),
+    ('funnel', funnel_section), ('migration_repeats', migration_repeats_section),
+    ('hourly', hourly_section),
     ('consumer_check', consumer_check_section), ('samples', samples_section),
 )
 
