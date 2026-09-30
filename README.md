@@ -303,3 +303,44 @@ Artifact names are attempt-scoped, so re-running a run does not collide with the
 artifact an earlier attempt already published. Everything here is read-only
 (`getTransaction` / `getSignaturesForAddress`): no transaction is constructed,
 signed, or sent, and no trade is placed.
+
+#### Profiling Bitquery's public creation/migration files (read-only)
+
+`backend-track/pump_dataset.py` inspects the free `pumpfun_creation_migrations`
+Parquet files in Bitquery's public S3 bucket — the same sample
+`pump_historical_sample.py` reads. It needs no key, makes no RPC calls, and treats
+the file as a third-party candidate list, **not** proof of on-chain events: every
+signature still needs RPC validation.
+
+Restricted networks cannot reach S3, so run it on GitHub's network. The
+`Profile Bitquery Pump.fun sample` workflow (read-only, no secrets) mirrors the
+profile into check-run annotations. It runs on pushes that change the profiler on
+this branch, and via **Run workflow** once it exists on the default branch:
+
+```bash
+gh api repos/:owner/:repo/actions/runs/RUN_ID/jobs --jq '.jobs[].id'
+gh api --paginate repos/:owner/:repo/check-runs/JOB_ID/annotations --jq '.[] | .title + " " + .message'
+```
+
+Measured on `2026-07-01.parquet` (57,896 rows, 7.2 MB, ZSTD). Worth knowing before
+using it:
+
+- **Filter before you trust a row.** Keep `Transaction_Result_Success == 1` and
+  `Indexing_OnTrunk == 1`. 6.2% of creation rows fail that test, and so do **97.8% of
+  migration rows** (only 479 of 21,649 succeed). `pump_historical_sample.py` does not
+  filter yet; its first four candidates happen to be fine.
+- **Count mints, not rows.** The 479 good migration rows cover 340 distinct mints: 107
+  mints have several successful rows within 11 slots of each other, never all from one
+  signer.
+- **Many graduations are instant.** Of the 309 launches that graduate inside the file,
+  63 (20%) migrate in the launch slot itself and 126 (41%) within about a minute. These
+  are probably bundled launches (unverified); they leave no independent early-buyer
+  window, so do not treat "graduated" alone as a success label.
+- **Legacy `create` still appears** (205 rows) beside `create_v2`; code should accept both.
+- **Column types differ from the vendor's documentation table.** `Block_Time`
+  (`2026-07-01T00:00:01.000000Z`), `Pool_Market_BaseCurrency_Symbol` and
+  `Pool_Market_BaseCurrency_Fungible` are strings; the two flags are `int8`.
+- **Only three daily files are public** (2026-07-01 to 2026-07-03, from a scan of
+  June–September 2026); the rest of the history is sold by the vendor.
+- **No buyers here.** The table holds creations and migrations only, so early-buyer
+  evidence still needs RPC history or the vendor's separate (paid) trades table.
