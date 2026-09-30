@@ -211,6 +211,14 @@ def init_db():
             "active BOOLEAN NOT NULL DEFAULT TRUE, "
             "created_at TIMESTAMP DEFAULT now())"
         )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS solana_signals ("
+            "org_id INTEGER NOT NULL REFERENCES organizations(id), "
+            "launch_signature TEXT NOT NULL, mint TEXT NOT NULL, pool TEXT NOT NULL, "
+            "launch_slot BIGINT NOT NULL, status TEXT NOT NULL, score NUMERIC NOT NULL, "
+            "result JSONB NOT NULL, scored_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
+            "PRIMARY KEY (org_id, launch_signature))"
+        )
         # Extend the original messages table without breaking existing rows.
         conn.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS org_id INTEGER")
         conn.commit()
@@ -726,3 +734,36 @@ async def paystack_webhook(request: Request):
     else:
         return {"received": True, "ignored": event_type}
     return {"received": True, "applied": event_type}
+
+# ---------------------------------------------------------------------------
+# Read-only Solana intelligence: verified evidence submitted by an indexer.
+# This endpoint does not place orders or claim to discover pools automatically.
+# ---------------------------------------------------------------------------
+from solana_signals import EvidenceBundle, score_bundle
+
+
+@app.post('/v1/solana/signals')
+def create_solana_signal(bundle: EvidenceBundle, org: dict = Depends(get_org_by_api_key)):
+    enforce_rate_limit(f"org:{org['org_id']}:signals", PLANS[org['plan']]['rpm'])
+    signal = score_bundle(bundle)
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO solana_signals (org_id, launch_signature, mint, pool, launch_slot, status, score, result) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb) "
+            "ON CONFLICT (org_id, launch_signature) DO UPDATE SET "
+            "status=EXCLUDED.status, score=EXCLUDED.score, result=EXCLUDED.result, scored_at=now()",
+            (org['org_id'], signal['launch_signature'], signal['mint'], signal['pool'],
+             signal['launch_slot'], signal['status'], signal['score'], json.dumps(signal)),
+        )
+        conn.commit()
+    return signal
+
+
+@app.get('/v1/solana/signals')
+def list_solana_signals(org: dict = Depends(get_org_by_api_key)):
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT result FROM solana_signals WHERE org_id=%s ORDER BY scored_at DESC LIMIT 100",
+            (org['org_id'],),
+        ).fetchall()
+    return [row['result'] for row in rows]

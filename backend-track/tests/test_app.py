@@ -327,3 +327,34 @@ class TestFullFlow:
             headers={"x-paystack-signature": "0" * 128},
         )
         assert r.status_code == 400
+
+@requires_db
+def test_solana_signal_http_roundtrip():
+    """Real Postgres + HTTP authentication + idempotent evidence scoring."""
+    with TestClient(main.app) as client:
+        username = 'signals_' + uuid.uuid4().hex[:12]
+        assert client.post('/register', params={'username': username, 'password': 'testpass'}).status_code == 200
+        token = client.post('/token', data={'username': username, 'password': 'testpass'}).json()['access_token']
+        headers = {'Authorization': f'Bearer {token}'}
+        org = client.post('/orgs', json={'name': 'Signal Tester'}, headers=headers).json()
+        key = client.post(f"/orgs/{org['id']}/keys", json={'name': 'signal'}, headers=headers).json()['key']
+        launch_signature = uuid.uuid4().hex * 2
+        payload = {
+            'launch': {'mint': 'M'*32, 'pool': 'P'*32, 'signature': launch_signature,
+                       'venue': 'pump', 'slot': 100, 'end_slot': 110},
+            'buys': [{'wallet': 'W'*32, 'signature': 'buy', 'slot': 105, 'order': 0,
+                      'raw_amount': 10, 'verified': True}],
+            'edges': [{'source': 'C'*32, 'destination': 'W'*32, 'signature': 'fund',
+                       'slot': 90, 'lamports': 100000000, 'verified': True}],
+            'labels': [{'address': 'C'*32, 'exchange': 'demo', 'source': 'test', 'verified': True}],
+            'performance': [{'wallet': 'W'*32, 'token': 'old', 'multiple': 55,
+                             'closed_slot': 80, 'evidence_signature': 'sale', 'verified': True}],
+            'buyers_complete': True, 'funding_complete': ['W'*32], 'pnl_complete': ['W'*32],
+        }
+        assert client.post('/v1/solana/signals', json=payload).status_code == 401
+        r = client.post('/v1/solana/signals', json=payload, headers={'X-API-Key': key})
+        assert r.status_code == 200, r.text
+        assert r.json()['cex_funded_50x_count'] == 1
+        assert client.post('/v1/solana/signals', json=payload, headers={'X-API-Key': key}).status_code == 200
+        rows = client.get('/v1/solana/signals', headers={'X-API-Key': key}).json()
+        assert sum(row['launch_signature'] == launch_signature for row in rows) == 1

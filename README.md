@@ -122,3 +122,53 @@ curl -X POST http://localhost:8000/messages \
   -H "Content-Type: application/json" \
   -d '{"sender":"alice","text":"what is the price"}'
 ```
+
+### Experimental Solana launch intelligence (read-only)
+
+`POST /v1/solana/signals` accepts an `EvidenceBundle` (see
+`backend-track/solana_signals.py`) with a launch, verified venue-decoded buys,
+verified explicit SOL transfer edges, verified CEX labels and **realized**
+pre-buy performance evidence. Authenticate using an organization's `X-API-Key`.
+`GET /v1/solana/signals` returns the organization's latest 100 results.
+Signals are upserted per `(organization, launch signature)`. Partial coverage is
+reported as `partial`, never silently interpreted as a negative result.
+
+**Not a live trading bot:** pool detection, venue-specific swap decoding,
+backfill, external PnL reconciliation, label verification, and alert delivery
+require a trusted external indexer/provider and are not implemented here. Do not
+send unsigned/unverified external data or act on these experimental scores as
+trade recommendations. No credentials or trading keys are required by this module.
+
+#### Pump.fun transaction replay (experimental)
+
+`backend-track/pump_replay.py` decodes official Pump program `create`,
+`create_v2`, and `buy` instruction discriminators from **raw** Solana
+`getTransaction` JSON. It verifies the program ID, required signers, successful
+execution, mint/curve accounts, slot window, and positive raw token-balance
+change for the buy instruction's user. No private wallet key is required.
+
+With a private provider URL in your shell environment (never commit it):
+
+```bash
+cd backend-track
+export SOLANA_RPC_URL='your-private-https-rpc-url'
+python pump_replay.py LAUNCH_SIGNATURE BUY_SIGNATURE [MORE_BUY_SIGNATURES...]
+```
+
+This replays **specified signatures**; it does not discover launches, enumerate
+all first buyers, or prove profitability. Raw JSON with loaded-address metadata
+is required; if your RPC omits the necessary data, the replay must be treated as
+incomplete. A WebSocket watcher and persisted cursor/backfill are still required
+for continuous monitoring. The tests use synthetic transactions, not verified
+historical Mainnet fixtures.
+
+To replay **real Mainnet** transactions in GitHub Actions without exposing your
+provider URL, add a repository Actions secret named `HELIUS_RPC_URL` containing
+your private **HTTP** Mainnet RPC URL. After the `Solana transaction replay`
+workflow is available on the repository's default branch, choose **Run
+workflow**, enter a public Pump.fun creation transaction signature and a public
+buy signature for that same token (within ten slots), and select this branch.
+The workflow fails closed if the secret is absent or no qualifying buy is found.
+It does not submit orders or log your RPC URL. GitHub may only show a newly
+added manual workflow in the Actions UI after it is present on the default
+branch; do not merge solely to trigger this test without reviewing the changes.
