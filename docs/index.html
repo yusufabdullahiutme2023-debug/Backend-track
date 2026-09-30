@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Message Management API — FastAPI · PostgreSQL · Redis</title>
+<meta name="description" content="A production-grade message-management REST API built with FastAPI, featuring JWT authentication, Redis rate limiting, Docker deployment, and automated CI/CD.">
+<style>
+  :root {
+    --bg: #0b0f17;
+    --panel: #111827;
+    --panel-2: #0f1522;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+    --accent: #34d399;
+    --accent-2: #38bdf8;
+    --border: #1f2a3d;
+    --code-bg: #0a0e16;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* Header */
+  header {
+    padding: 90px 0 70px;
+    background:
+      radial-gradient(ellipse 60% 50% at 20% 0%, rgba(52,211,153,.12), transparent),
+      radial-gradient(ellipse 50% 40% at 80% 10%, rgba(56,189,248,.10), transparent);
+    border-bottom: 1px solid var(--border);
+    text-align: center;
+  }
+  .status {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: rgba(52,211,153,.08); border: 1px solid rgba(52,211,153,.35);
+    color: var(--accent); border-radius: 999px;
+    padding: 6px 16px; font-size: .85rem; font-weight: 600;
+    margin-bottom: 28px; letter-spacing: .3px;
+  }
+  .status .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  h1 { font-size: clamp(2rem, 5vw, 3rem); letter-spacing: -.5px; margin-bottom: 18px; }
+  h1 .grad {
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .subtitle { color: var(--muted); font-size: 1.15rem; max-width: 640px; margin: 0 auto 34px; }
+  .cta-row { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 12px 26px; border-radius: 10px;
+    font-weight: 600; font-size: .95rem; transition: transform .15s, box-shadow .15s;
+  }
+  .btn:hover { text-decoration: none; transform: translateY(-2px); }
+  .btn-primary { background: linear-gradient(90deg, var(--accent), #10b981); color: #04120c; }
+  .btn-primary:hover { box-shadow: 0 8px 24px rgba(52,211,153,.25); }
+  .btn-ghost { border: 1px solid var(--border); color: var(--text); background: var(--panel); }
+  .btn-ghost:hover { border-color: var(--accent-2); }
+
+  /* Sections */
+  section { padding: 64px 0; }
+  section + section { border-top: 1px solid var(--border); }
+  h2 { font-size: 1.6rem; margin-bottom: 8px; letter-spacing: -.3px; }
+  .section-sub { color: var(--muted); margin-bottom: 32px; }
+
+  /* Stack grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 22px;
+  }
+  .card h3 { font-size: 1.05rem; margin-bottom: 6px; display: flex; align-items: center; gap: 10px; }
+  .card p { color: var(--muted); font-size: .92rem; }
+  .icon {
+    width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 1rem; font-weight: 700;
+    background: rgba(56,189,248,.12); color: var(--accent-2);
+  }
+
+  /* Endpoints table */
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: .75rem; letter-spacing: .8px; }
+  td code, .chip code {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 2px 8px; font-size: .85em;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+  .method { font-weight: 700; font-family: ui-monospace, Consolas, monospace; font-size: .85rem; }
+  .get { color: var(--accent-2); } .post { color: var(--accent); }
+  .put { color: #fbbf24; } .delete { color: #f87171; }
+  .lock { color: #fbbf24; font-size: .8rem; }
+
+  /* Pipeline steps */
+  .steps { display: flex; flex-direction: column; gap: 0; }
+  .step { display: flex; gap: 18px; }
+  .step-rail { display: flex; flex-direction: column; align-items: center; }
+  .step-num {
+    width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
+    background: var(--panel); border: 1px solid var(--accent);
+    color: var(--accent); display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: .9rem;
+  }
+  .step-line { width: 1px; flex: 1; background: var(--border); }
+  .step-body { padding-bottom: 28px; }
+  .step-body h3 { font-size: 1rem; margin-bottom: 4px; }
+  .step-body p { color: var(--muted); font-size: .92rem; max-width: 620px; }
+
+  /* Chips */
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; }
+  .chip {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 999px;
+    padding: 7px 16px; font-size: .85rem; color: var(--text);
+  }
+
+  /* Try it */
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; overflow-x: auto; font-size: .85rem; line-height: 1.7;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace; color: #c9d1d9;
+  }
+  .comment { color: #6b7f95; }
+
+  footer {
+    border-top: 1px solid var(--border); padding: 40px 0; text-align: center;
+    color: var(--muted); font-size: .9rem;
+  }
+  footer .name { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container">
+    <div class="status"><span class="dot"></span> Live on Render</div>
+    <h1>Message Management <span class="grad">REST API</span></h1>
+    <p class="subtitle">
+      A production-grade backend built with <strong>FastAPI</strong> — featuring JWT authentication,
+      Redis rate limiting, Docker deployment, and an automated CI/CD pipeline that smoke-tests
+      every push end-to-end.
+    </p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://backend-track-nz8c.onrender.com/docs" target="_blank" rel="noopener">🚀 Interactive API Docs</a>
+      <a class="btn btn-ghost" href="https://github.com/yusufabdullahiutme2023-debug/Backend-track" target="_blank" rel="noopener">⭐ View Source on GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/yusufabdullahiutme2023-debug" target="_blank" rel="noopener">👤 My GitHub Profile</a>
+    </div>
+  </div>
+</header>
+
+<section>
+  <div class="container">
+    <h2>Tech Stack</h2>
+    <p class="section-sub">Every layer chosen for simplicity, performance, and zero-maintenance hosting.</p>
+    <div class="grid">
+      <div class="card"><h3><span class="icon">⚡</span> FastAPI + Pydantic</h3><p>High-performance async Python framework with strict request/response validation and auto-generated OpenAPI docs.</p></div>
+      <div class="card"><h3><span class="icon">🐘</span> PostgreSQL (Neon)</h3><p>Relational persistence with serverless Postgres. Direct parameterized SQL via psycopg2 — no N+1, no magic.</p></div>
+      <div class="card"><h3><span class="icon">🔐</span> JWT Auth + bcrypt</h3><p>OAuth2 password flow issuing signed HS256 tokens (1-hour expiry); passwords hashed with bcrypt via passlib.</p></div>
+      <div class="card"><h3><span class="icon">🚦</span> Redis Rate Limiting</h3><p>Per-user request throttling on Upstash Redis using atomic INCR + TTL windows — configurable via environment.</p></div>
+      <div class="card"><h3><span class="icon">🐳</span> Docker</h3><p>Single lightweight image (python:3.14-slim). Runs identically in CI, on Render, and on any laptop.</p></div>
+      <div class="card"><h3><span class="icon">🔁</span> GitHub Actions CI/CD</h3><p>Every push: build the image, spin up a Postgres 16 service container, boot the API, and run a live end-to-end smoke test.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>API Endpoints</h2>
+    <p class="section-sub">Try them live in the <a href="https://backend-track-nz8c.onrender.com/docs" target="_blank" rel="noopener">Swagger UI</a> — no setup required.</p>
+    <table>
+      <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><span class="method post">POST</span></td><td><code>/register</code></td><td>—</td><td>Create a new user account</td></tr>
+        <tr><td><span class="method post">POST</span></td><td><code>/token</code></td><td>—</td><td>Log in — returns a JWT access token</td></tr>
+        <tr><td><span class="method get">GET</span></td><td><code>/</code></td><td>—</td><td>Health check</td></tr>
+        <tr><td><span class="method post">POST</span></td><td><code>/messages</code></td><td><span class="lock">🔒 JWT</span></td><td>Submit a message (auto-classified into a category)</td></tr>
+        <tr><td><span class="method get">GET</span></td><td><code>/messages</code></td><td>—</td><td>List all messages</td></tr>
+        <tr><td><span class="method get">GET</span></td><td><code>/messages/{id}</code></td><td>—</td><td>Get a single message</td></tr>
+        <tr><td><span class="method put">PUT</span></td><td><code>/messages/{id}/approve</code></td><td><span class="lock">🔒 JWT</span></td><td>Mark a message as approved</td></tr>
+        <tr><td><span class="method delete">DELETE</span></td><td><code>/messages/{id}</code></td><td><span class="lock">🔒 JWT</span></td><td>Delete a message</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>CI/CD Pipeline</h2>
+    <p class="section-sub">Quality gates run automatically on every push and pull request.</p>
+    <div class="steps">
+      <div class="step">
+        <div class="step-rail"><div class="step-num">1</div><div class="step-line"></div></div>
+        <div class="step-body"><h3>Build the Docker image</h3><p>GitHub Actions builds the same image that ships to production — no "works on my machine."</p></div>
+      </div>
+      <div class="step">
+        <div class="step-rail"><div class="step-num">2</div><div class="step-line"></div></div>
+        <div class="step-body"><h3>Spin up Postgres 16 service container</h3><p>A real database with health checks, matching the hosted Neon environment.</p></div>
+      </div>
+      <div class="step">
+        <div class="step-rail"><div class="step-num">3</div><div class="step-line"></div></div>
+        <div class="step-body"><h3>Boot the API container</h3><p>The app runs with the same environment-variable contract used in production.</p></div>
+      </div>
+      <div class="step">
+        <div class="step-rail"><div class="step-num">4</div><div class="step-line"></div></div>
+        <div class="step-body"><h3>Live end-to-end smoke test</h3><p>Register → login → create message with Bearer token → verify it appears in the list. The build fails fast if any step breaks.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Try It Yourself</h2>
+    <p class="section-sub">Three requests and you've exercised the whole auth + data flow.</p>
+<pre><span class="comment"># 1. Register</span>
+curl -X POST "https://backend-track-nz8c.onrender.com/register?username=alice&amp;password=secret123"
+
+<span class="comment"># 2. Log in — returns an access token</span>
+curl -X POST https://backend-track-nz8c.onrender.com/token -d "username=alice&amp;password=secret123"
+
+<span class="comment"># 3. Create a message (replace TOKEN with your access_token)</span>
+curl -X POST https://backend-track-nz8c.onrender.com/messages \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sender":"alice","text":"what is the price"}'</pre>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h2>Skills Demonstrated</h2>
+    <p class="section-sub">What shipping this project end-to-end covers.</p>
+    <div class="chips">
+      <span class="chip">Python</span>
+      <span class="chip">FastAPI</span>
+      <span class="chip">REST API Design</span>
+      <span class="chip">JWT / OAuth2 Auth</span>
+      <span class="chip">Password Hashing (bcrypt)</span>
+      <span class="chip">PostgreSQL</span>
+      <span class="chip">Raw SQL (psycopg2)</span>
+      <span class="chip">Redis</span>
+      <span class="chip">Rate Limiting</span>
+      <span class="chip">Pydantic Validation</span>
+      <span class="chip">Docker</span>
+      <span class="chip">GitHub Actions CI/CD</span>
+      <span class="chip">Render / Neon / Upstash</span>
+      <span class="chip">Environment Config</span>
+      <span class="chip">API Documentation (OpenAPI)</span>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>Built &amp; maintained by <span class="name">Yusuf Abdullahi</span> ·
+      <a href="https://github.com/yusufabdullahiutme2023-debug" target="_blank" rel="noopener">GitHub</a> ·
+      <a href="https://backend-track-nz8c.onrender.com/docs" target="_blank" rel="noopener">API Docs</a> ·
+      <a href="https://github.com/yusufabdullahiutme2023-debug/Backend-track" target="_blank" rel="noopener">Source Code</a>
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

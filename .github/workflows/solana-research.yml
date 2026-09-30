@@ -1,0 +1,63 @@
+name: Bounded Solana launch research
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub runs scheduled workflows ONLY on the default branch, and timing
+    # can be delayed. Two 60-second samples per day, NOT live monitoring.
+    - cron: '17 6,18 * * *'
+  push:
+    branches: [arena/01a0ed1a-backend-track]
+    paths:
+      - 'backend-track/pump_actions_sample.py'
+      - 'backend-track/tests/test_pump_actions_sample.py'
+      - '.github/workflows/solana-research.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bounded-solana-sampling
+  cancel-in-progress: false
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install read-only sampler requirements
+        run: python -m pip install -r backend-track/requirements.txt
+      - name: Listen for 60 seconds (max eight RPC transaction lookups)
+        working-directory: backend-track
+        env:
+          SOLANA_RPC_URL: ${{ secrets.HELIUS_RPC_URL }}
+        run: |
+          if [ -z "$SOLANA_RPC_URL" ]; then
+            echo 'Missing HELIUS_RPC_URL repository Actions secret' >&2
+            exit 1
+          fi
+          python pump_actions_sample.py --seconds 60 --output pump-report.json
+          python - <<'PY'
+          import json, os
+          data = json.load(open('pump-report.json'))
+          print(f"::notice::Bounded research: validated={len(data['validated_launches'])} "
+                f"candidates={data['candidates']} unavailable={data['unavailable_transactions']}")
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('### Bounded Solana research (NOT live)\n')
+              f.write(f"Validated launches: {len(data['validated_launches'])}; "
+                      f"candidates: {data['candidates']}; "
+                      f"unavailable: {data['unavailable_transactions']}\n")
+              for launch in data['validated_launches']:
+                  f.write(f"- {launch['signature']} — mint {launch['mint']} (slot {launch['slot']})\n")
+          PY
+      - name: Retain public evidence for seven days
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: solana-launch-research-${{ github.run_id }}
+          path: backend-track/pump-report.json
+          retention-days: 7
