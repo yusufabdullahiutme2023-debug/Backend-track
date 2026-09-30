@@ -37,9 +37,16 @@ jobs:
             python - <<'PY'
           import json
           text = open('replay-result.txt').read()
-          entry = json.loads(text[text.index('{'):])['validated_launch']
+          result = json.loads(text[text.index('{'):])
+          entry = result['validated_launch']
+          buys = result['validated_buys']
           print('::notice::Verified historical launch: ' + entry['signature'] +
-                ' mint=' + entry['mint'] + ' slot=' + str(entry['slot']))
+                ' mint=' + entry['mint'] + ' slot=' + str(entry['slot']) +
+                ' sampled_buy_count=' + str(len(buys)) +
+                ' buyer_validation=' + result['buyer_validation'])
+          for buy in buys[:3]:
+              print('::notice::Verified sampled buy: ' + buy['signature'] +
+                    ' wallet=' + buy['wallet'] + ' slot=' + str(buy['slot']))
           PY
           fi
           {
