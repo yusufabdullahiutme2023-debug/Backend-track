@@ -121,8 +121,10 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          # Attempt-scoped: re-running a run keeps attempt 1's artifact instead of
-          # colliding on a duplicate name and failing the upload.
+          # Attempt-scoped on purpose. upload-artifact requires unique names and
+          # returns conflict errors on a duplicate, so including the attempt keeps
+          # a re-run from colliding with the artifact an earlier attempt already
+          # published under this run id.
           name: solana-launch-research-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: |
             backend-track/pump-report.json

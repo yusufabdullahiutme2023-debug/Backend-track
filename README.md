@@ -228,3 +228,35 @@ Actions schedules can be delayed or skipped and run only from the repository's
 **default branch**. The workflow on the Arena branch can be push-tested now;
 the schedule will not activate until the code is reviewed and merged into the
 default branch. Do not mistake these short snapshots for persistent hosting.
+
+#### Early-buyer evidence and retrieving a run's findings
+
+`backend-track/pump_evidence.py` takes **one** RPC-verified launch and reports its
+early buyers with the proof behind each one: the decoded `buy` discriminator, the
+matching mint and bonding curve, a signing buyer, and a positive token balance
+delta. Every run also reports coverage accounting — pages scanned, in-window
+signatures seen, transactions attempted versus fetched, unavailable transactions,
+and whether pagination ever reached the launch slot.
+
+Coverage rules are enforced in code, not just documented:
+
+- `coverage_proven` is `False` unless pagination reached the launch slot, nothing
+  in the window was unavailable or skipped, **and** an independent block-level
+  attestation exists. RPC pagination depth alone never proves completeness.
+- `assert_no_unproven_first_n_claim` raises if a "first N buyers" phrasing appears
+  while coverage is unproven. A bounded sample therefore always reads as
+  *"N early buyers observed … NOT the first 50 buyers"*.
+
+Findings are printed as `::notice::` annotations as well as JSON. Workflow
+artifacts live on Azure blob storage, which restricted networks cannot download;
+annotations stay readable through the public check-run annotations API:
+
+```bash
+gh api repos/:owner/:repo/actions/runs/RUN_ID/jobs --jq '.jobs[].id'
+gh api repos/:owner/:repo/check-runs/JOB_ID/annotations --jq '.[].message'
+```
+
+Artifact names are attempt-scoped, so re-running a run does not collide with the
+artifact an earlier attempt already published. Everything here is read-only
+(`getTransaction` / `getSignaturesForAddress`): no transaction is constructed,
+signed, or sent, and no trade is placed.
