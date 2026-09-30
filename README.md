@@ -333,14 +333,14 @@ using it:
   mints have several successful rows within 11 slots of each other, never all from one
   signer.
 - **Many graduations are instant.** Of the 309 launches that graduate inside the file,
-  63 (20%) migrate in the launch slot itself and 126 (41%) within about a minute. These
-  are probably bundled launches (unverified); they leave no independent early-buyer
-  window, so do not treat "graduated" alone as a success label.
+  63 (20%) migrate in the launch slot itself, and 126 (41%, including those 63) within
+  about a minute. These are probably bundled launches (unverified); they leave no
+  independent early-buyer window, so do not treat "graduated" alone as a success label.
 - **Legacy `create` still appears** (205 rows) beside `create_v2`; code should accept both.
 - **Column types differ from the vendor's documentation table.** `Block_Time`
   (`2026-07-01T00:00:01.000000Z`), `Pool_Market_BaseCurrency_Symbol` and
   `Pool_Market_BaseCurrency_Fungible` are strings; the two flags are `int8`.
-- **Only three daily files are public** (2026-07-01 to 2026-07-03, from a scan of
-  June–September 2026); the rest of the history is sold by the vendor.
+- **Only three daily files are publicly downloadable** (2026-07-01 to 2026-07-03; every
+  other day from 2026-06-01 to 2026-09-29 answered 403). The vendor sells longer windows.
 - **No buyers here.** The table holds creations and migrations only, so early-buyer
   evidence still needs RPC history or the vendor's separate (paid) trades table.
