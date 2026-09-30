@@ -1,15 +1,27 @@
 """Bounded, read-only early-buyer evidence for ONE verified Pump.fun launch.
 
-This module exists because two things are easy to get wrong:
+The central honesty rule: a bounded RPC sample can prove that a buy happened,
+but it can almost never prove how many buyers there were. So every report
+carries an explicit ``evidence_status`` instead of implying one:
 
-1. Calling a bounded RPC sample "the first 50 buyers". It is not. A single
+``buys_observed``            at least one buy verified; the count is a LOWER BOUND
+``no_buys_in_window``        zero buys AND coverage independently proven
+``coverage_proven``          full coverage independently attested
+``unknown_incomplete``       the launch-time window could not be read; the buyer
+                             count is UNKNOWN -- never "zero buyers"
+
+Two failure modes this module refuses to produce:
+
+1. Reporting "zero buyers" because the RPC could not return launch-time
+   transactions. Absence of data is unknown, not a negative finding.
+2. Reporting "the first 50 buyers" from pagination depth. A single
    ``getSignaturesForAddress`` page is newest-first and provider retention is
-   not guaranteed, so pagination depth alone never proves completeness.
-2. Publishing evidence only as a workflow artifact. Artifact blobs live on
-   Azure blob storage, which restricted networks (and this repository's own
-   sandbox) cannot reach. Findings are therefore also emitted as GitHub
-   Actions ``::notice::`` annotations, which stay readable through the
-   public check-run annotations API.
+   not guaranteed, so depth never proves completeness.
+
+Findings are emitted as GitHub Actions ``::notice::`` annotations as well as
+JSON, because artifact blobs live on Azure blob storage that restricted
+networks cannot download while annotations stay readable through the public
+check-run annotations API.
 
 Read-only: only ``getTransaction`` / ``getSignaturesForAddress`` are issued.
 No transaction is ever constructed, signed, or sent, and no trade is placed.
@@ -30,7 +42,28 @@ from pump_replay import PUMP_PROGRAM, fetch_transaction, parse_launch
 # OUTSIDE this RPC path (for example an independent full-block scan). Nothing in
 # this module can produce that attestation, so the claim stays unavailable.
 FIRST_N_BUYERS = 50
+
+BUYS_OBSERVED = 'buys_observed'
+NO_BUYS_IN_WINDOW = 'no_buys_in_window'
+COVERAGE_PROVEN = 'coverage_proven'
+UNKNOWN_INCOMPLETE = 'unknown_incomplete'
+
+UNKNOWN_PHRASE = 'unknown/incomplete'
 _SECRETISH = re.compile(r'(?:api[-_]?key|token|authorization)=[^\s&"]+', re.IGNORECASE)
+_FIRST_N = re.compile(r'first\s+\d+\s+buyers?', re.IGNORECASE)
+_ZERO_BUYERS = re.compile(r'\b(?:no|zero|0)\s+(?:early\s+)?buyers?\b', re.IGNORECASE)
+# Explicit disclaimers are the opposite of an overclaim, but they contain the very
+# phrases the guards look for. Strip them before searching so the guards test what
+# the report asserts rather than what it denies.
+_DISCLAIMERS = (
+    re.compile(r'NOT\s+"?the\s+first\s+\d+\s+buyers?"?', re.IGNORECASE),
+    re.compile(r'NOT\s+"?(?:no|zero|0)\s+(?:early\s+)?buyers?"?', re.IGNORECASE),
+)
+
+# Exit codes: 0 produced a report of any status, 2 the launch itself is unknown.
+EXIT_REPORT = 0
+EXIT_LAUNCH_UNKNOWN = 2
+EXIT_USAGE = 1
 
 
 def redact(text: str) -> str:
@@ -71,6 +104,55 @@ def find_launch(url, max_program_signatures=40, max_fetches=25):
     return None, diagnostics
 
 
+def launch_time_reachable(coverage) -> tuple[bool, list[str]]:
+    """Did we actually read the launch-time window, or did the RPC fail us?
+
+    Every unmet condition is a reason the buyer count is unknown rather than a
+    reason to report zero.
+    """
+    reasons = []
+    if coverage['early_signatures_seen'] == 0:
+        reasons.append('the RPC returned no bonding-curve signatures inside the '
+                       'launch window (history may be beyond provider retention)')
+    if coverage['transactions_attempted'] == 0:
+        reasons.append('no launch-time transaction was available to decode')
+    elif coverage['transactions_fetched'] == 0:
+        reasons.append(f"all {coverage['transactions_attempted']} launch-time "
+                       'transaction(s) attempted were unavailable from the RPC')
+    if not coverage['reached_launch_slot']:
+        reasons.append('pagination never reached the launch slot, so earlier '
+                       'launch-time transactions may exist that we never saw')
+    return (not reasons), reasons
+
+
+def coverage_proven(sample, transactions_fetched) -> bool:
+    """True only when nothing in the window is unaccounted for AND an external
+    attestation exists. Pagination depth by itself is deliberately insufficient.
+    """
+    return bool(
+        sample.get('reached_launch_slot')
+        and sample.get('unavailable_transactions', 0) == 0
+        and transactions_fetched >= sample.get('early_signatures_seen', 0)
+        and sample.get('independent_block_verified') is True
+    )
+
+
+def classify(report) -> str:
+    """Assign the evidence status. Unknown always wins over a count."""
+    coverage = report['coverage']
+    reachable, reasons = launch_time_reachable(coverage)
+    coverage['launch_time_reachable'] = reachable
+    coverage['unreachable_reasons'] = reasons
+    if not reachable:
+        return UNKNOWN_INCOMPLETE
+    proven = coverage['coverage_proven']
+    if report['verified_buy_count'] > 0:
+        return COVERAGE_PROVEN if proven else BUYS_OBSERVED
+    # Zero decoded buys is only a finding when coverage is proven; otherwise the
+    # buyers may simply be in transactions we never managed to read.
+    return NO_BUYS_IN_WINDOW if proven else UNKNOWN_INCOMPLETE
+
+
 def collect_evidence(url, launch, max_pages=4, page_size=100):
     """Collect verified early buys plus an explicit accounting of what is missing."""
     sample = collect_early_buys(url, launch, max_pages=max_pages, page_size=page_size)
@@ -92,12 +174,15 @@ def collect_evidence(url, launch, max_pages=4, page_size=100):
             'signatures were decoded')
     # Same-slot ordering comes from the RPC's own ordering, not from block data.
     missing_data.append('same-slot ordering not confirmed against independent block data')
-    return {
+    report = {
         'launch': launch.model_dump(),
         'verified_buys': buys,
         'distinct_wallets': sorted(wallets),
         'distinct_wallet_count': len(wallets),
         'verified_buy_count': len(buys),
+        'evidence_status': None,      # set by classify()
+        'buyer_count_known': False,   # only true with proven coverage
+        'first_n_claim_allowed': False,
         'coverage': {
             'pages_scanned': sample['pages_scanned'],
             'early_signatures_seen': sample['early_signatures_seen'],
@@ -108,77 +193,98 @@ def collect_evidence(url, launch, max_pages=4, page_size=100):
             'independent_block_verified': sample.get('independent_block_verified', False),
             'buyers_complete': False,
             'coverage_proven': coverage_proven(sample, fetched),
+            'launch_time_reachable': None,
+            'unreachable_reasons': [],
             'missing_data': missing_data,
         },
-        'claim': None,  # filled below; never a first-N claim without proof
+        'claim': None,
         'read_only': True,
         'note': 'Bounded read-only RPC sample. Not a trading signal.',
     }
-
-
-def coverage_proven(sample, transactions_fetched) -> bool:
-    """True only when nothing in the window is unaccounted for AND an external
-    attestation exists. Pagination depth by itself is deliberately insufficient.
-    """
-    return bool(
-        sample.get('reached_launch_slot')
-        and sample.get('unavailable_transactions', 0) == 0
-        and transactions_fetched >= sample.get('early_signatures_seen', 0)
-        and sample.get('independent_block_verified') is True
-    )
+    return report
 
 
 def early_buyer_claim(report) -> str:
     """Human-readable claim that cannot overstate coverage."""
     coverage = report['coverage']
+    status = report['evidence_status']
     count = report['distinct_wallet_count']
     buys = report['verified_buys']
     slots = sorted({b['slot'] for b in buys})
     span = f'slots {slots[0]}-{slots[-1]}' if slots else 'no slots observed'
-    if coverage['coverage_proven']:
-        return (f'{count} distinct early buyers verified across {len(buys)} buy '
-                f'transactions ({span}); coverage independently verified')
-    reasons = '; '.join(coverage['missing_data']) or 'no coverage evidence recorded'
-    return (f'{count} distinct early buyers observed across {len(buys)} verified buy '
-            f'transactions ({span}); coverage INCOMPLETE so this is NOT the first '
-            f'{FIRST_N_BUYERS} buyers. Missing: {reasons}')
+
+    if status == UNKNOWN_INCOMPLETE:
+        reasons = '; '.join(coverage['unreachable_reasons']) or 'no reachable launch-time data'
+        return (f'{UNKNOWN_PHRASE}: the launch-time transactions could not be fully read, '
+                f'so the number of early buyers is UNKNOWN. This is NOT "zero buyers" and '
+                f'NOT a first-{FIRST_N_BUYERS} buyer list. Verified buys in the reachable '
+                f'subset: {len(buys)}. Reasons: {reasons}')
+    if status == COVERAGE_PROVEN:
+        return (f'{count} distinct early buyers verified across {len(buys)} buy transactions '
+                f'({span}); coverage independently verified')
+    if status == NO_BUYS_IN_WINDOW:
+        return (f'no buys in the launch window ({span}); coverage independently verified, '
+                f'so this is a finding rather than missing data')
+    return (f'at least {count} distinct early buyers observed across {len(buys)} verified buy '
+            f'transactions ({span}); this count is a LOWER BOUND because coverage is '
+            f'incomplete, so it is NOT the first {FIRST_N_BUYERS} buyers. Missing: '
+            + ('; '.join(coverage['missing_data']) or 'no coverage evidence recorded'))
 
 
 def finalize(report) -> dict:
-    """Attach the claim and refuse to publish an unproven first-N claim."""
+    """Attach status and claim, then refuse to publish an unprovable claim."""
+    report['evidence_status'] = classify(report)
+    coverage = report['coverage']
+    coverage['buyers_complete'] = coverage['coverage_proven']
+    report['buyer_count_known'] = coverage['coverage_proven']
+    report['first_n_claim_allowed'] = coverage['coverage_proven']
     report['claim'] = early_buyer_claim(report)
-    report['coverage']['buyers_complete'] = report['coverage']['coverage_proven']
     assert_no_unproven_first_n_claim(report)
+    assert_no_unproven_zero_claim(report)
     return report
+
+
+def _strip_disclaimers(text: str) -> str:
+    for pattern in _DISCLAIMERS:
+        text = pattern.sub('', text)
+    return text
 
 
 def assert_no_unproven_first_n_claim(report) -> None:
     """Guard rail: a first-N phrasing may only exist when coverage is proven."""
-    coverage = report['coverage']
-    if coverage.get('coverage_proven'):
+    if report['coverage'].get('coverage_proven'):
         return
-    claim = str(report.get('claim', ''))
-    # "NOT the first 50 buyers" is an explicit disclaimer and is allowed; a bare
-    # affirmative first-N claim is not.
-    affirmative = re.search(r'(?<!NOT the )first\s+\d+\s+buyers?', claim, re.IGNORECASE)
-    if affirmative:
+    claim = _strip_disclaimers(str(report.get('claim', '')))
+    if _FIRST_N.search(claim):
+        raise AssertionError(f'refusing to publish unproven buyer coverage: {claim!r}')
+
+
+def assert_no_unproven_zero_claim(report) -> None:
+    """Guard rail: an unknown window must never be worded as "zero buyers"."""
+    if report.get('evidence_status') != UNKNOWN_INCOMPLETE:
+        return
+    claim = _strip_disclaimers(str(report.get('claim', '')))
+    if _ZERO_BUYERS.search(claim):
         raise AssertionError(
-            f'refusing to publish unproven buyer coverage: {claim!r}')
+            f'refusing to report missing launch-time data as zero buyers: {claim!r}')
 
 
 def annotation_lines(report, max_lines=12, max_chars=480) -> list[str]:
     """Render findings as Actions annotations (retrievable via the check-run API)."""
     launch = report['launch']
     coverage = report['coverage']
+    status = report['evidence_status']
+    # Unknown gets a warning so an incomplete run is impossible to skim past.
+    status_level = 'warning' if status == UNKNOWN_INCOMPLETE else 'notice'
     lines = [
         f"::notice::Verified launch mint={launch['mint']} pool={launch['pool']} "
         f"slot={launch['slot']} signature={launch['signature']}",
-        f"::notice::Early buyers: {report['distinct_wallet_count']} distinct wallets / "
-        f"{report['verified_buy_count']} verified buys; coverage_proven="
-        f"{str(coverage['coverage_proven']).lower()}; reached_launch_slot="
+        f"::{status_level}::Evidence status: {status}; buyer_count_known="
+        f"{str(report['buyer_count_known']).lower()}; verified_buys="
+        f"{report['verified_buy_count']}; reached_launch_slot="
         f"{str(coverage['reached_launch_slot']).lower()}; unavailable="
         f"{coverage['unavailable_transactions']}",
-        f"::notice::Claim: {report['claim']}",
+        f"::{status_level}::Claim: {report['claim']}",
     ]
     # Reserve room for the "omitted" trailer so the bound is never exceeded.
     omitted = max(report['verified_buy_count'] - (max_lines - len(lines) - 1), 0)
@@ -191,7 +297,7 @@ def annotation_lines(report, max_lines=12, max_chars=480) -> list[str]:
             f"order={buy['order']} raw_amount={buy['raw_amount']} "
             f"signature={buy['signature']} proof=buy_ix+mint+pool+signer+token_delta")
     if omitted:
-        lines.append(f"::notice::{omitted} further verified buys omitted from "
+        lines.append(f'::notice::{omitted} further verified buys omitted from '
                      'annotations; see artifact JSON')
     return [redact(line)[:max_chars] for line in lines]
 
@@ -218,24 +324,32 @@ def main() -> int:
         else:
             launch, diagnostics = find_launch(url)
             if launch is None:
-                raise ValueError(
-                    'no verified Pump.fun creation found in the bounded sample: '
-                    + json.dumps(diagnostics))
+                raise ValueError('no verified Pump.fun creation in the bounded sample: '
+                                 + json.dumps(diagnostics))
+    except ValueError as exc:
+        # The launch itself is unknown. Say so explicitly rather than exiting
+        # with a bare failure that could be read as "no launch happened".
+        print(f'::warning::Evidence status: {UNKNOWN_INCOMPLETE}; launch not verifiable '
+              f'({redact(str(exc))})')
+        print(redact(f'Launch verification failed: {exc}'), file=sys.stderr)
+        return EXIT_LAUNCH_UNKNOWN
+    try:
         report = finalize(collect_evidence(url, launch, max_pages=args.max_pages,
                                            page_size=args.page_size))
         report['discovery'] = diagnostics
     except (ValueError, KeyError, IndexError, OSError) as exc:
         # Transport errors can embed the provider URL and its API key.
         safe = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+        print(f'::warning::Evidence status: {UNKNOWN_INCOMPLETE}; buyer history unreadable')
         print(redact(f'Evidence collection failed: {safe}'), file=sys.stderr)
-        return 1
+        return EXIT_LAUNCH_UNKNOWN
     with open(args.output, 'w') as handle:
         json.dump(report, handle, indent=2)
     print(json.dumps(report, indent=2))
     if not args.no_annotations:
         for line in annotation_lines(report):
             print(line)
-    return 0
+    return EXIT_REPORT
 
 
 if __name__ == '__main__':

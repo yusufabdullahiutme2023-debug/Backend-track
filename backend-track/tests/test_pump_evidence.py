@@ -3,13 +3,19 @@
 No network, no RPC, no transactions: every provider call is faked. These tests
 exist to make the honesty rules executable rather than aspirational.
 """
+import json
+import sys
+
 import pytest
 
 import pump_evidence
 import pump_history
-from pump_evidence import (FIRST_N_BUYERS, annotation_lines, assert_no_unproven_first_n_claim,
+from pump_evidence import (BUYS_OBSERVED, COVERAGE_PROVEN, EXIT_LAUNCH_UNKNOWN,
+                           FIRST_N_BUYERS, NO_BUYS_IN_WINDOW, UNKNOWN_INCOMPLETE,
+                           UNKNOWN_PHRASE, annotation_lines,
+                           assert_no_unproven_first_n_claim, assert_no_unproven_zero_claim,
                            collect_evidence, coverage_proven, early_buyer_claim, finalize,
-                           find_launch, redact)
+                           find_launch, launch_time_reachable, redact)
 from solana_signals import Launch
 
 SECRET_URL = 'https://mainnet.helius-rpc.com/?api-key=SUPERSECRETKEY'
@@ -135,11 +141,12 @@ def test_claim_reports_truncation_when_the_decode_budget_is_hit(monkeypatch):
     assert 'only 100 of 150 in-window signatures were decoded' in report['claim']
 
 
-def test_claim_flags_pagination_that_never_reached_the_launch_slot(monkeypatch):
+def test_pagination_that_never_reached_the_launch_slot_is_unknown(monkeypatch):
     monkeypatch.setattr(pump_evidence, 'collect_early_buys',
                         lambda *a, **kw: sample(reached_launch_slot=False))
     report = finalize(collect_evidence(SECRET_URL, launch()))
     assert report['coverage']['reached_launch_slot'] is False
+    assert report['evidence_status'] == UNKNOWN_INCOMPLETE
     assert 'pagination never reached the launch slot' in report['claim']
 
 
@@ -228,6 +235,7 @@ def test_annotations_are_length_and_count_bounded(monkeypatch):
 def test_annotations_never_leak_the_provider_url_or_key():
     leaked = {'launch': launch().model_dump(), 'verified_buys': [buy()],
               'distinct_wallet_count': 1, 'verified_buy_count': 1,
+              'evidence_status': 'buys_observed', 'buyer_count_known': False,
               'claim': f'the provider was {SECRET_URL}',
               'coverage': {'coverage_proven': False, 'reached_launch_slot': False,
                            'unavailable_transactions': 0, 'missing_data': []}}
@@ -240,3 +248,172 @@ def test_redact_strips_query_credentials_but_keeps_signatures():
     cleaned = redact(f'url={SECRET_URL} sig={"a" * 64}')
     assert 'SUPERSECRETKEY' not in cleaned
     assert 'a' * 64 in cleaned
+
+
+# ------------------------------------------- unknown/incomplete vs zero buyers
+
+def test_reachability_requires_every_launch_time_transaction_to_be_readable():
+    reachable, reasons = launch_time_reachable(
+        {'early_signatures_seen': 2, 'transactions_attempted': 2,
+         'transactions_fetched': 2, 'reached_launch_slot': True})
+    assert reachable is True and reasons == []
+    reachable, reasons = launch_time_reachable(
+        {'early_signatures_seen': 2, 'transactions_attempted': 2,
+         'transactions_fetched': 0, 'reached_launch_slot': True})
+    assert reachable is False
+    assert any('unavailable from the RPC' in reason for reason in reasons)
+
+
+def test_unreadable_launch_window_reports_unknown_never_zero(monkeypatch):
+    """The core rule: unreachable data is unknown, not a zero buyer count."""
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[], seen=3, attempted=3, unavailable=3))
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    assert report['evidence_status'] == UNKNOWN_INCOMPLETE
+    assert report['coverage']['transactions_fetched'] == 0
+    assert report['coverage']['launch_time_reachable'] is False
+    assert report['buyer_count_known'] is False
+    assert report['first_n_claim_allowed'] is False
+    assert UNKNOWN_PHRASE in report['claim']
+    assert 'number of early buyers is UNKNOWN' in report['claim']
+    # It must not smuggle in a count either: no "0 distinct early buyers".
+    assert '0 distinct early buyers' not in report['claim']
+    assert 'zero buyers' not in report['claim'].replace('NOT "zero buyers"', '')
+
+
+def test_empty_curve_history_is_unknown_not_zero(monkeypatch):
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[], seen=0, attempted=0))
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    assert report['evidence_status'] == UNKNOWN_INCOMPLETE
+    assert report['verified_buy_count'] == 0
+    assert 'provider retention' in report['claim']
+    assert 'no launch-time transaction was available to decode' in report['claim']
+
+
+def test_zero_decoded_buys_without_proven_coverage_is_unknown(monkeypatch):
+    """Everything readable decoded fine, but no buys: still not a zero finding."""
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[], seen=2, attempted=2))
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    assert report['coverage']['launch_time_reachable'] is True
+    assert report['verified_buy_count'] == 0
+    assert report['evidence_status'] == UNKNOWN_INCOMPLETE
+    assert report['coverage']['coverage_proven'] is False
+
+
+def test_zero_buys_becomes_a_finding_only_with_proven_coverage(monkeypatch):
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[], seen=2, attempted=2, independent=True))
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    assert report['evidence_status'] == NO_BUYS_IN_WINDOW
+    assert report['buyer_count_known'] is True
+    assert 'no buys in the launch window' in report['claim']
+    assert 'independently verified' in report['claim']
+
+
+def test_partial_sample_labels_its_count_a_lower_bound(monkeypatch):
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys', lambda *a, **kw: sample())
+    report = finalize(collect_evidence(SECRET_URL, launch()))
+    assert report['evidence_status'] == BUYS_OBSERVED
+    assert report['buyer_count_known'] is False
+    assert 'LOWER BOUND' in report['claim']
+    assert 'at least 1 distinct early buyers' in report['claim']
+    assert 'NOT the first 50 buyers' in report['claim']
+
+
+def test_status_transitions_are_exhaustive(monkeypatch):
+    cases = [
+        (sample(buys=[], seen=0, attempted=0), UNKNOWN_INCOMPLETE),
+        (sample(buys=[], seen=2, attempted=2), UNKNOWN_INCOMPLETE),
+        (sample(buys=[buy()], seen=2, attempted=2), BUYS_OBSERVED),
+        (sample(buys=[buy()], seen=2, attempted=2, independent=True), COVERAGE_PROVEN),
+        (sample(buys=[], seen=2, attempted=2, independent=True), NO_BUYS_IN_WINDOW),
+    ]
+    for stub, expected in cases:
+        monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                            lambda *a, _stub=stub, **kw: _stub)
+        report = finalize(collect_evidence(SECRET_URL, launch()))
+        assert report['evidence_status'] == expected, stub
+
+
+# ----------------------------------------------------------------- claim guards
+
+def test_zero_claim_guard_rejects_unproven_zero_wording():
+    report = {'claim': 'there were zero buyers for this launch',
+              'evidence_status': UNKNOWN_INCOMPLETE, 'coverage': {'coverage_proven': False}}
+    with pytest.raises(AssertionError):
+        assert_no_unproven_zero_claim(report)
+    report['claim'] = 'no buyers participated'
+    with pytest.raises(AssertionError):
+        assert_no_unproven_zero_claim(report)
+    # The same wording is legitimate once coverage is proven.
+    report['coverage']['coverage_proven'] = True
+    report['evidence_status'] = NO_BUYS_IN_WINDOW
+    assert assert_no_unproven_zero_claim(report) is None
+
+
+def test_disclaimers_do_not_trip_the_guards():
+    """'NOT the first 50 buyers' / 'NOT "zero buyers"' are denials, not claims."""
+    report = {'evidence_status': UNKNOWN_INCOMPLETE, 'coverage': {'coverage_proven': False},
+              'claim': (f'{UNKNOWN_PHRASE}: buyers UNKNOWN. This is NOT "zero buyers" and '
+                        'NOT the first 50 buyers.')}
+    assert_no_unproven_first_n_claim(report)
+    assert_no_unproven_zero_claim(report)
+
+
+def test_finalize_rejects_a_bare_affirmative_zero_claim(monkeypatch):
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[], seen=0, attempted=0))
+    monkeypatch.setattr(pump_evidence, 'early_buyer_claim',
+                        lambda report: 'this launch had zero buyers')
+    with pytest.raises(AssertionError):
+        finalize(collect_evidence(SECRET_URL, launch()))
+
+
+# ------------------------------------------------------------- CLI exit codes
+
+def test_main_reports_unknown_and_exits_2_when_the_launch_is_unverifiable(
+        monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv('SOLANA_RPC_URL', SECRET_URL)
+    monkeypatch.setattr(sys, 'argv', ['pump_evidence.py', '--launch-signature', 'L' * 64,
+                                      '--output', str(tmp_path / 'out.json')])
+
+    def fetch(url, signature):
+        raise ValueError('Transaction not available from this RPC')
+
+    monkeypatch.setattr(pump_evidence, 'fetch_transaction', fetch)
+    assert pump_evidence.main() == EXIT_LAUNCH_UNKNOWN
+    captured = capsys.readouterr()
+    assert f'::warning::Evidence status: {UNKNOWN_INCOMPLETE}' in captured.out
+    assert 'launch not verifiable' in captured.out
+    # No report file is written when there is nothing verified to report.
+    assert not (tmp_path / 'out.json').exists()
+
+
+def test_main_reports_unknown_when_no_launch_is_found(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv('SOLANA_RPC_URL', SECRET_URL)
+    monkeypatch.setattr(sys, 'argv', ['pump_evidence.py',
+                                      '--output', str(tmp_path / 'out.json')])
+    monkeypatch.setattr(pump_evidence, 'find_launch', lambda url: (None, {'seen': 0}))
+    assert pump_evidence.main() == EXIT_LAUNCH_UNKNOWN
+    captured = capsys.readouterr()
+    assert f'::warning::Evidence status: {UNKNOWN_INCOMPLETE}' in captured.out
+    assert 'SUPERSECRETKEY' not in captured.out + captured.err
+
+
+def test_main_writes_a_report_for_any_evidence_status(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv('SOLANA_RPC_URL', SECRET_URL)
+    out = tmp_path / 'out.json'
+    monkeypatch.setattr(sys, 'argv', ['pump_evidence.py', '--launch-signature', 'L' * 64,
+                                      '--output', str(out)])
+    monkeypatch.setattr(pump_evidence, 'fetch_transaction', lambda url, sig: {})
+    monkeypatch.setattr(pump_evidence, 'parse_launch', lambda tx: launch())
+    monkeypatch.setattr(pump_evidence, 'collect_early_buys',
+                        lambda *a, **kw: sample(buys=[], seen=0, attempted=0))
+    assert pump_evidence.main() == 0
+    report = json.loads(out.read_text())
+    assert report['evidence_status'] == UNKNOWN_INCOMPLETE
+    assert report['buyer_count_known'] is False
+    captured = capsys.readouterr()
+    assert f'::warning::Evidence status: {UNKNOWN_INCOMPLETE}' in captured.out

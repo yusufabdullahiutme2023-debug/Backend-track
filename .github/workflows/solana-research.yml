@@ -85,37 +85,48 @@ jobs:
           )
           fi
           if [ -z "$LAUNCH_SIGNATURE" ]; then
-            echo '::notice::No verified launch available in this bounded sample; buyer validation skipped.'
+            # A quiet sample is missing data. It is never a finding that no
+            # launches or no buyers existed.
+            echo '::warning::Evidence status: unknown/incomplete; no verified launch in this bounded sample, so buyer coverage is unknown'
             exit 0
           fi
           set +e
           python pump_evidence.py --launch-signature "$LAUNCH_SIGNATURE" --output pump-evidence.json
           status=$?
           set -e
-          if [ "$status" -ne 0 ]; then
-            # Non-zero is an honest "no evidence" outcome, not a workflow failure:
-            # an empty or unavailable sample must not look like a broken pipeline.
-            echo "::notice::Buyer validation produced no evidence for $LAUNCH_SIGNATURE"
+          if [ ! -f pump-evidence.json ]; then
+            # Unreachable launch-time data is unknown/incomplete, which must not
+            # be reported as a green run that silently found nothing.
+            echo "::warning::Evidence status: unknown/incomplete; no evidence collected for $LAUNCH_SIGNATURE (exit $status)"
             exit 0
           fi
           python - <<'PY'
           import json, os
           report = json.load(open('pump-evidence.json'))
           coverage = report['coverage']
+          status = report['evidence_status']
+          level = 'warning' if status == 'unknown_incomplete' else 'notice'
+          print(f"::{level}::Evidence status: {status}; "
+                f"buyer_count_known={str(report['buyer_count_known']).lower()}")
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write('\n### Early-buyer evidence (read-only)\n')
               f.write(f"Launch: `{report['launch']['signature']}` — mint "
                       f"`{report['launch']['mint']}` (slot {report['launch']['slot']})\n\n")
-              f.write(f"- Verified buys: {report['verified_buy_count']}\n")
-              f.write(f"- Distinct wallets: {report['distinct_wallet_count']}\n")
+              f.write(f"- **evidence_status: {status}**\n")
+              f.write(f"- Verified buys (lower bound): {report['verified_buy_count']}\n")
+              f.write(f"- Distinct wallets (lower bound): {report['distinct_wallet_count']}\n")
+              f.write(f"- buyer_count_known: {report['buyer_count_known']}\n")
               f.write(f"- Pages scanned: {coverage['pages_scanned']}\n")
               f.write(f"- In-window signatures seen: {coverage['early_signatures_seen']}\n")
               f.write(f"- Transactions attempted/fetched: {coverage['transactions_attempted']}/"
                       f"{coverage['transactions_fetched']}\n")
-              f.write(f"- Unavailable transactions: {coverage['unavailable_transactions']}\n")
-              f.write(f"- Reached launch slot: {coverage['reached_launch_slot']}\n")
-              f.write(f"- Coverage proven: {coverage['coverage_proven']}\n\n")
-              f.write(f"**Claim:** {report['claim']}\n")
+              f.write(f"- unavailable_transactions: {coverage['unavailable_transactions']}\n")
+              f.write(f"- reached_launch_slot: {coverage['reached_launch_slot']}\n")
+              f.write(f"- coverage_proven: {coverage['coverage_proven']}\n")
+              for reason in coverage['unreachable_reasons']:
+                  f.write(f"- Unreachable: {reason}\n")
+              f.write('\n')
+              f.write(f"**claim:** {report['claim']}\n")
           PY
       - name: Retain public evidence for seven days
         if: success()
