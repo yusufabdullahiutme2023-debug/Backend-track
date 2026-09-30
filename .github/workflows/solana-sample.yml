@@ -32,7 +32,7 @@ jobs:
           result=$?
           cat replay-result.txt
           if [ "$result" -ne 0 ]; then
-            echo "::error::$(head -c 200 replay-result.txt)"
+            echo "::error::$(tail -n 1 replay-result.txt | head -c 200)"
           fi
           {
             echo '### Bounded Pump.fun replay'
