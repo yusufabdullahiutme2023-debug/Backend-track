@@ -33,6 +33,14 @@ jobs:
           cat replay-result.txt
           if [ "$result" -ne 0 ]; then
             echo "::error::$(tail -n 1 replay-result.txt | head -c 200)"
+          else
+            python - <<'PY'
+          import json
+          text = open('replay-result.txt').read()
+          entry = json.loads(text[text.index('{'):])['validated_launch']
+          print('::notice::Verified historical launch: ' + entry['signature'] +
+                ' mint=' + entry['mint'] + ' slot=' + str(entry['slot']))
+          PY
           fi
           {
             echo '### Bounded Pump.fun replay'
