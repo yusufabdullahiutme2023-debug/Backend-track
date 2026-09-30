@@ -31,6 +31,9 @@ jobs:
           python pump_discover.py > replay-result.txt 2>&1
           result=$?
           cat replay-result.txt
+          if [ "$result" -ne 0 ]; then
+            echo "::error::$(head -c 200 replay-result.txt)"
+          fi
           {
             echo '### Bounded Pump.fun replay'
             echo '```text'
