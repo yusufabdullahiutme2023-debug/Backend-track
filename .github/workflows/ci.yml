@@ -42,6 +42,10 @@ jobs:
           curl -sf -X POST localhost:8000/messages -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"sender":"ci","text":"hello"}'
           curl -sf localhost:8000/messages | grep '"id":1'
 
+      - name: Show container logs when smoke test fails
+        if: failure()
+        run: docker logs bt || true
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
