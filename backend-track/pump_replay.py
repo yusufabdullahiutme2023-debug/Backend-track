@@ -13,11 +13,33 @@ import urllib.request
 from solana_signals import Buy, Launch
 
 PUMP_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
+# Pump's mint-authority PDA: seeds [b'mint-authority'] under PUMP_PROGRAM. The official IDL lists it as
+# account 1 of `create` and `create_v2` and of no other instruction, so every launch transaction
+# mentions it and ordinary trades do not. A test re-derives the address from the seed.
+MINT_AUTHORITY = 'TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM'
+# Discriminators and account positions come from the official Pump IDL
+# (pump-fun/pump-public-docs, idl/pump.json). tests/fixtures/pump_idl_subset.json
+# snapshots exactly these entries and a test pins this table to it, so a typo here
+# cannot silently attribute a buy to the wrong wallet.
 DISCRIMINATORS = {
     'create': bytes([24, 30, 200, 40, 5, 28, 7, 119]),
     'create_v2': bytes([214, 144, 76, 236, 95, 139, 49, 180]),
     'buy': bytes([102, 6, 61, 18, 1, 218, 235, 234]),
+    # Newer buy instructions. On mainnet many curve buys use buy_exact_sol_in
+    # rather than the original buy; the *_v2 pair carries an explicit quote mint.
+    'buy_exact_sol_in': bytes([56, 252, 116, 8, 158, 223, 205, 95]),
+    'buy_v2': bytes([184, 23, 238, 97, 103, 197, 211, 61]),
+    'buy_exact_quote_in_v2': bytes([194, 171, 28, 70, 104, 77, 91, 47]),
 }
+# (mint, bonding_curve, user) account positions of every buy instruction we decode.
+# The original pair shares one layout and the v2 pair another.
+BUY_LAYOUTS = {
+    'buy': (2, 3, 6),
+    'buy_exact_sol_in': (2, 3, 6),
+    'buy_v2': (1, 10, 13),
+    'buy_exact_quote_in_v2': (1, 10, 13),
+}
+CREATION_LOG_LINES = ('Program log: Instruction: Create', 'Program log: Instruction: CreateV2')
 _ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 
 
@@ -27,6 +49,32 @@ def decode58(value: str) -> bytes:
         number = number * 58 + _ALPHABET.index(char)
     raw = number.to_bytes((number.bit_length() + 7) // 8, 'big') if number else b''
     return b'\x00' * (len(value) - len(value.lstrip('1'))) + raw
+
+
+def creation_log(logs) -> bool:
+    """Cheap prefilter: does a logsNotification carry a Pump create/create_v2 log line?
+
+    Logs are only a hint. The proof of a launch is always the decoded transaction.
+    """
+    return any(isinstance(line, str) and line.strip() in CREATION_LOG_LINES
+               for line in logs or [])
+
+
+def log_verdict(logs) -> str:
+    """Decide from a logsNotification alone whether a transaction must be fetched.
+
+    ``creation``  a Pump create/create_v2 line is present: fetch and verify.
+    ``unknown``   logs are missing, empty, malformed or truncated, so a creation cannot
+                  be ruled out: fetch and verify rather than risk a silent miss.
+    ``other``     complete logs with no creation line: safe to skip without a fetch.
+    """
+    if not isinstance(logs, list) or not logs:
+        return 'unknown'
+    if creation_log(logs):
+        return 'creation'
+    if any(isinstance(line, str) and line.strip() == 'Log truncated' for line in logs):
+        return 'unknown'
+    return 'other'
 
 
 def _parts(tx: dict):
@@ -92,13 +140,17 @@ def parse_buys(tx: dict, launch: Launch) -> list[Buy]:
         return []
     _, _, signature, signed = parts
     found = []
-    # Official IDL buy: mint=2, bonding_curve=3, user=6.
+    # Account positions per buy instruction come from the official IDL (BUY_LAYOUTS).
+    # The mint, pool, signer and positive-token-delta checks below all have to pass,
+    # so a layout drift fails closed (no buy) rather than naming the wrong wallet.
     for order, (kind, accounts) in enumerate(_instructions(tx)):
-        if kind != 'buy' or len(accounts) < 7:
+        layout = BUY_LAYOUTS.get(kind)
+        if layout is None or len(accounts) <= max(layout):
             continue
-        if accounts[2] != launch.mint or accounts[3] != launch.pool:
+        mint_index, pool_index, user_index = layout
+        if accounts[mint_index] != launch.mint or accounts[pool_index] != launch.pool:
             continue
-        owner = accounts[6]
+        owner = accounts[user_index]
         if owner not in signed:
             continue
         change = _balances(tx, 'postTokenBalances', launch.mint, owner) - _balances(

@@ -4,7 +4,7 @@ services:
   - type: worker
     name: backend-track-pump-worker
     runtime: python
-    branch: arena/01a0ed1a-backend-track
+    branch: main
     rootDir: backend-track
     region: frankfurt
     plan: 0.5c-512mb
@@ -17,3 +17,8 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      # `creations` listens only to launches. A live comparison (see the README) found it delivered every
+      # launch the whole-program stream did, at about 1/60 of the credits. Set `program` to go back to
+      # listening to every Pump transaction; switching starts a new cursor ("monitor from now").
+      - key: PUMP_WORKER_STREAM
+        value: creations

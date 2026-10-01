@@ -1,0 +1,56 @@
+name: CI debug (temporary, no secrets)
+
+on:
+  push:
+    branches: [arena/01a0f47f-backend-track]
+    paths:
+      - '.github/workflows/ci-debug.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r backend-track/requirements.txt -r backend-track/requirements-dev.txt
+      - name: Run the suite and report failures as annotations
+        working-directory: backend-track
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/testdb
+          SECRET_KEY: ci-test-key
+        run: |
+          set +e
+          python -m pytest -q -p no:cacheprovider --tb=short -rf > /tmp/pytest.txt 2>&1
+          code=$?
+          CODE=$code python - <<'PY'
+          import os, re
+          text = open('/tmp/pytest.txt').read()
+          failed = re.findall(r'^FAILED .*$', text, re.M)
+          print(f"::notice::pytest exit {os.environ['CODE']}; {len(failed)} failed; " + (text.strip().splitlines() or ['(no output)'])[-1][:200])
+          for line in failed[:6]:
+              print('::error::' + line[:900])
+          m = re.search(r'=+ FAILURES =+\n(.*?)(?:\n=+ short test summary|\Z)', text, re.S)
+          body = m.group(1) if m else text[-3000:]
+          for i in range(0, min(len(body), 3 * 3000), 3000):
+              chunk = body[i:i + 3000].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print('::warning::' + chunk)
+          PY
+          exit 0

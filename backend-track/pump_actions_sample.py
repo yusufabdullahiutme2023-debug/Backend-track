@@ -11,14 +11,8 @@ import sys
 import time
 
 import websockets
-from pump_replay import PUMP_PROGRAM, fetch_transaction, parse_launch
+from pump_replay import PUMP_PROGRAM, creation_log, fetch_transaction, parse_launch
 from pump_worker import websocket_url
-
-
-def creation_log(logs):
-    return any(isinstance(line, str) and line.strip() in (
-        'Program log: Instruction: Create', 'Program log: Instruction: CreateV2')
-        for line in logs)
 
 
 async def sample(http_url, seconds=60, max_candidates=8):

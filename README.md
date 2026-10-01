@@ -141,11 +141,16 @@ trade recommendations. No credentials or trading keys are required by this modul
 
 #### Pump.fun transaction replay (experimental)
 
-`backend-track/pump_replay.py` decodes official Pump program `create`,
-`create_v2`, and `buy` instruction discriminators from **raw** Solana
-`getTransaction` JSON. It verifies the program ID, required signers, successful
-execution, mint/curve accounts, slot window, and positive raw token-balance
-change for the buy instruction's user. No private wallet key is required.
+`backend-track/pump_replay.py` decodes official Pump program `create` and
+`create_v2` launches and the four buy instructions (`buy`, `buy_exact_sol_in`,
+`buy_v2`, `buy_exact_quote_in_v2`) from **raw** Solana `getTransaction` JSON. It
+verifies the program ID, required signers, successful execution, mint/curve
+accounts, slot window, and positive raw token-balance change for the buy
+instruction's user. Discriminators and account positions come from the official
+Pump IDL, and a test pins them to a snapshot of it
+(`tests/fixtures/pump_idl_subset.json`). Only **top-level** instructions are
+read: a creation or buy routed through another program (CPI) is not seen. No
+private wallet key is required.
 
 With a private provider URL in your shell environment (never commit it):
 
@@ -179,15 +184,147 @@ branch; do not merge solely to trigger this test without reviewing the changes.
 validates creation transactions against the official program ID and instruction
 discriminator, and stores launch evidence plus a crash-safe cursor in PostgreSQL.
 It subscribes before bounded reconnect backfill and refuses to silently cross a
-gap larger than 10,000 transactions. It is read-only and does **not** claim a
-verified first-buyer set, funding trace, PnL, or production alert signal.
+gap larger than 10,000 transactions (the default limit). It is read-only and
+does **not** claim a verified first-buyer set, funding trace, PnL, or production alert signal.
 
 Run only as a *separate persistent worker* with private `SOLANA_RPC_URL` (Helius
 Mainnet HTTPS URL) and `DATABASE_URL` in the worker's secret environment. Do not
 run it inside the web server or GitHub Actions: those are not persistent worker
-hosts. Monitor Helius credits and run reconciliation tests before deployment.
-Do not store the URL or credentials in Git or chat. If the worker encounters a
-history gap, investigate it; do not reset the cursor to hide missing events.
+hosts. Do not store the URL or credentials in Git or chat. If the worker
+encounters a history gap, investigate it; do not reset the cursor to hide missing
+events.
+
+How it stays live (the test suite exercises every point against fakes, with no
+provider and no credits):
+
+- **One fetch per launch, not per trade.** A logs notification already says
+  whether a transaction can be a creation. Only creation notifications, plus any
+  whose logs are missing or truncated (so a creation is never ruled out blind),
+  are fetched with `getTransaction` and decoded. Everything else only advances the
+  in-memory cursor, which is persisted with each heartbeat.
+- **Empty fetches are retried in place.** A just-confirmed transaction is often
+  not served yet, so the worker tries up to six times in all (waiting 0.25 s,
+  0.5 s, 1 s, 2 s, then 3 s between attempts, about 6.75 s in total; a 429 waits
+  for `Retry-After`) before giving up. Live runs left 4-5% of just-announced
+  launches unavailable after about 1.5 s, which is why the budget is that long. Only exhausted retries restart
+  the connection, and the cursor never moves past an unverified creation.
+- **One Postgres connection**, reopened once if the server drops it. A launch and
+  the cursor are still written in a single transaction.
+- **Backfill after a disconnect** skips transactions that failed on-chain and
+  fetches the rest with bounded concurrency, applying results strictly in order.
+- **Heartbeat and watchdog.** Every 15 s the worker upserts one row in
+  `pump_worker_heartbeat` and logs a counters line. A stream that delivers nothing
+  for 60 s is torn down and rebuilt. Reconnects wait 1, 2, 4 ... 60 s and the
+  ladder resets after a connection that lived a minute.
+
+Check on it from anywhere that can reach the database, without touching the
+provider: `DATABASE_URL=... python pump_worker.py --status` prints the heartbeat
+and exits `0` (streaming or backfilling, heartbeat fresh), `1` (stale, or
+reconnecting, stopped or `needs_manual_backfill`) or `2` (never started). Use
+`--max-age SECONDS` to change the 90 s staleness limit.
+
+Optional settings (environment variables on the worker):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PUMP_WORKER_HEARTBEAT_SECONDS` | 15 | heartbeat interval |
+| `PUMP_WORKER_STALL_SECONDS` | 60 (300 for `creations`) | silence before the stream is rebuilt |
+| `PUMP_WORKER_STREAM` | `program` (the Render Blueprint sets `creations`) | what to listen to: `program` (every Pump transaction) or `creations` (only launches; see below) |
+| `PUMP_WORKER_BACKFILL_CONCURRENCY` | 4 | parallel `getTransaction` calls while catching up; use `1` on a plan limited to 10 requests/s |
+| `PUMP_WORKER_MAX_BACKFILL_PAGES` | 10 | pages of 1,000 signatures the worker may replay after a disconnect |
+
+If the gap since the cursor is larger than the page limit, or the cursor has aged
+out of the provider's history, the worker records status `needs_manual_backfill`,
+skips nothing, and re-checks only every five minutes. Decide whether you want the
+missed launches: if so, redeploy once with a higher `PUMP_WORKER_MAX_BACKFILL_PAGES`
+(each page can cost up to 1,000 credits to replay). A cursor that has aged out
+of the provider's history cannot be recovered this way.
+
+**Credits.** `getTransaction` and `getSignaturesForAddress` cost 1 Helius credit
+each. The WebSocket stream is metered separately, at 2 credits per 0.1 MB
+streamed, and a `program` subscription delivers every buy and sell even though
+the worker skips most of them. Measured on live data (see the results below):
+
+| | notifications | bytes each | stream credits per month at that rate |
+| --- | --- | --- | --- |
+| `program` stream | about 105 per second, half of them failed transactions | about 1.9 KB | about **10.4M** (the whole Developer plan) |
+| `creations` stream | about 0.4 per second | about 8.8 KB | about **0.2M** |
+
+With `creations` the one-credit `getTransaction` lookups (one per launch, about
+0.42 per second) are the larger cost, roughly 1.1M a month, so the worker uses
+about **1.3M credits a month** in total. The Helius Free plan (1M credits, 10
+requests per second) does not quite cover that and Developer (10M) does
+comfortably, so plan on Developer. These are single samples taken at about 09:10
+and 09:30 UTC on 2026-10-01; busy hours will be higher. Read the Helius usage page
+after the first hour before leaving the worker running.
+
+**Choosing the stream.** `program` subscribes to the Pump program, so every buy and
+sell is delivered and billed. `creations` subscribes to Pump's mint-authority
+account instead (`TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM`, the PDA of the seed
+`mint-authority`, re-derived by a test). Pump's IDL lists it as account 1 of
+`create` and `create_v2` and of no other instruction, so almost only launches
+arrive, and backfill after a disconnect reads that account's history, so the
+10,000-signature limit covers hours instead of minutes. Each stream keeps its own
+cursor: switching starts a new one ("monitor from now") and leaves the old one
+untouched. On the creations stream the subscription itself is the filter: every
+successful notification is fetched and verified by the decoder, so nothing depends
+on Pump's log text (the program stream still uses the create/create_v2 log line to
+skip trades). The Render Blueprint runs `creations`; the code default stays
+`program` so an existing deployment keeps its cursor.
+
+#### Comparing the two streams on live data (spends credits)
+
+`backend-track/pump_stream_compare.py` opens both subscriptions at once for a fixed
+window and reports, with one number each: launches the program stream saw that the
+creations stream missed; real launches the log filter would skip; the real bytes
+per notification and the projected monthly credits of each stream; how often logs
+are missing or truncated; and whether launches that reach the authority through a
+lookup table are still delivered (it fetches a sample and says which case each
+was, and whether the decoder accepts it as a launch). Every successful transaction
+the log filter would skip gets a full diagnosis: the instructions and programs that
+ran, and whether it decodes as a launch. It is read-only, never prints the provider
+URL, and is capped in time and in streamed bytes: the default request (300 s,
+40 MB) cannot stream more than about 800 credits' worth, plus at most 25 sampled
+`getTransaction` calls. With `streams=creations` in the request file it runs only the
+cheap subscription (about 15 credits per 200 s), which is enough to investigate the
+log filter, lookup tables and decoding without paying for the whole-program stream.
+
+It runs from `.github/workflows/stream-compare.yml`, using the existing
+`HELIUS_RPC_URL` Actions secret. The only thing that starts a push run is a change
+to `backend-track/stream_compare.request` on the working branch (bump its `run=`
+line), so editing the tool or the workflow never spends credits, and there is no
+schedule. The limits in that file are enforced in code and cannot exceed the cap
+above. Read the result on the run page (summary and annotations).
+
+#### What the first live checks found (2026-10-01)
+
+Run 1, both streams for 199.6 s (stopped by its 40 MB budget, about 840 credits):
+
+- The creations stream delivered **all 64 launches** the program stream delivered
+  (0 missed). With zero misses in 64, the 95% upper bound on the miss rate is about
+  4.7% from this sample alone; the structural argument (the account is required by
+  `create` and `create_v2`) is what makes a real miss rate of zero plausible.
+- **22 of the 24 launches sampled list the mint authority only through an address
+  lookup table, and all 22 were delivered**, so the provider's log subscription does
+  match lookup-table accounts. This was the main unknown.
+- The same launch arrived on both streams within 7 ms of each other (median; p95
+  15 ms).
+- Program stream: 20,901 notifications (104.7 per second), 49.6% failed
+  transactions, 72 with missing or truncated logs (0.7% of the successful ones).
+
+Run 2, creations stream only for 599.6 s (about 89 credits):
+
+- 251 successful notifications and 19-20 failed attempts (about 7%); 272 in all.
+- **37 of the 38 transactions sampled decode as launches.** The 38th is the one
+  transaction the create/create_v2 log filter would have skipped, and it is not a
+  launch: it is a PumpSwap `CreatePool` that happens to include Pump's mint
+  authority. (Run 1 also had one filter skip, but it was not diagnosed because the
+  diagnosis was added afterwards, so it is not counted as evidence.) The creations
+  stream handles such look-alikes because the decoder, not the log text, decides.
+- 36 of the 38 resolve the authority through a lookup table.
+
+Not yet shown: behaviour at busy hours or across a Pump program upgrade. Re-run the
+comparison after any Pump upgrade (it takes one edit to the request file).
 
 #### Persistent worker hosting (Render Blueprint)
 
@@ -198,9 +335,11 @@ Render currently lists that worker compute tier at **$7/month**, plus any
 third-party API/database usage; check the Render confirmation screen for the
 actual charge before creating it. It is not provisioned by committing this file.
 
-In Render: **New → Blueprint → connect this GitHub repository → branch
-`arena/01a0ed1a-backend-track` → `render.yaml`**. Before approving the initial
-creation, set the prompted secrets directly in Render:
+In Render: **New → Blueprint → connect this GitHub repository → branch `main` →
+`render.yaml`**. The Blueprint deploys `main`, so merge the worker changes first.
+Before approving the initial creation, set the prompted secrets directly in Render
+(the Blueprint already sets `PUMP_WORKER_STREAM=creations`; plan on the Helius
+Developer plan, see Credits above):
 
 - `SOLANA_RPC_URL`: Helius **Mainnet HTTPS RPC URL** (not WSS). Do not paste in
   chat, Git, build logs, or a screenshot.
@@ -242,7 +381,7 @@ mistake these short snapshots for persistent hosting.
 #### Early-buyer evidence and retrieving a run's findings
 
 `backend-track/pump_evidence.py` takes **one** RPC-verified launch and reports its
-early buyers with the proof behind each one: the decoded `buy` discriminator, the
+early buyers with the proof behind each one: the decoded buy instruction, the
 matching mint and bonding curve, a signing buyer, and a positive token balance
 delta. Every run also reports coverage accounting — pages scanned, in-window
 signatures seen, transactions attempted versus fetched, unavailable transactions,
@@ -303,3 +442,44 @@ Artifact names are attempt-scoped, so re-running a run does not collide with the
 artifact an earlier attempt already published. Everything here is read-only
 (`getTransaction` / `getSignaturesForAddress`): no transaction is constructed,
 signed, or sent, and no trade is placed.
+
+#### Profiling Bitquery's public creation/migration files (read-only)
+
+`backend-track/pump_dataset.py` inspects the free `pumpfun_creation_migrations`
+Parquet files in Bitquery's public S3 bucket — the same sample
+`pump_historical_sample.py` reads. It needs no key, makes no RPC calls, and treats
+the file as a third-party candidate list, **not** proof of on-chain events: every
+signature still needs RPC validation.
+
+Restricted networks cannot reach S3, so run it on GitHub's network. The
+`Profile Bitquery Pump.fun sample` workflow (read-only, no secrets) mirrors the
+profile into check-run annotations. It runs on pushes that change the profiler on
+this branch, and via **Run workflow** once it exists on the default branch:
+
+```bash
+gh api repos/:owner/:repo/actions/runs/RUN_ID/jobs --jq '.jobs[].id'
+gh api --paginate repos/:owner/:repo/check-runs/JOB_ID/annotations --jq '.[] | .title + " " + .message'
+```
+
+Measured on `2026-07-01.parquet` (57,896 rows, 7.2 MB, ZSTD). Worth knowing before
+using it:
+
+- **Filter before you trust a row.** Keep `Transaction_Result_Success == 1` and
+  `Indexing_OnTrunk == 1`. 6.2% of creation rows fail that test, and so do **97.8% of
+  migration rows** (only 479 of 21,649 succeed). `pump_historical_sample.py` does not
+  filter yet; its first four candidates happen to be fine.
+- **Count mints, not rows.** The 479 good migration rows cover 340 distinct mints: 107
+  mints have several successful rows within 11 slots of each other, never all from one
+  signer.
+- **Many graduations are instant.** Of the 309 launches that graduate inside the file,
+  63 (20%) migrate in the launch slot itself, and 126 (41%, including those 63) within
+  about a minute. These are probably bundled launches (unverified); they leave no
+  independent early-buyer window, so do not treat "graduated" alone as a success label.
+- **Legacy `create` still appears** (205 rows) beside `create_v2`; code should accept both.
+- **Column types differ from the vendor's documentation table.** `Block_Time`
+  (`2026-07-01T00:00:01.000000Z`), `Pool_Market_BaseCurrency_Symbol` and
+  `Pool_Market_BaseCurrency_Fungible` are strings; the two flags are `int8`.
+- **Only three daily files are publicly downloadable** (2026-07-01 to 2026-07-03; every
+  other day from 2026-06-01 to 2026-09-29 answered 403). The vendor sells longer windows.
+- **No buyers here.** The table holds creations and migrations only, so early-buyer
+  evidence still needs RPC history or the vendor's separate (paid) trades table.

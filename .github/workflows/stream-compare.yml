@@ -1,0 +1,50 @@
+name: Compare Pump.fun log subscriptions (bounded, spends credits)
+
+on:
+  # This spends Helius credits: about 2 per 0.1 MB streamed, hard-capped by the request file
+  # (backend-track/stream_compare.request, whose limits are enforced in pump_stream_compare.py).
+  # It runs when THAT FILE changes on this branch, or when started by hand. Editing this workflow
+  # or the tool does not start a run, and there is deliberately no schedule.
+  workflow_dispatch:
+  push:
+    branches: [arena/01a0f47f-backend-track]
+    paths:
+      - 'backend-track/stream_compare.request'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bounded-solana-sampling
+  cancel-in-progress: false
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install requirements
+        run: python -m pip install -r backend-track/requirements.txt
+      - name: Compare the two subscriptions (time- and byte-capped, read-only)
+        working-directory: backend-track
+        env:
+          SOLANA_RPC_URL: ${{ secrets.HELIUS_RPC_URL }}
+        run: |
+          if [ -z "$SOLANA_RPC_URL" ]; then
+            echo 'Missing HELIUS_RPC_URL repository Actions secret' >&2
+            exit 1
+          fi
+          python pump_stream_compare.py --request stream_compare.request \
+            --output stream-compare.json --summary "$GITHUB_STEP_SUMMARY" --annotate
+      - name: Retain the report for seven days
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stream-compare-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: backend-track/stream-compare.json
+          if-no-files-found: ignore
+          retention-days: 7
