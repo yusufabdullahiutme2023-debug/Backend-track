@@ -267,3 +267,11 @@ def test_a_stream_filtered_by_its_subscription_trusts_it_instead_of_the_log_text
 def test_only_the_creations_stream_skips_the_log_filter():
     assert pump_worker.Settings.from_env({}).filter_logs is True
     assert pump_worker.Settings.from_env({'PUMP_WORKER_STREAM': 'creations'}).filter_logs is False
+
+
+def test_the_default_retry_budget_covers_the_lag_seen_on_live_data():
+    # Two live runs left 4-5% of just-announced launches unavailable after ~1.5 s of retrying.
+    settings = pump_worker.Settings()
+    waited = sum(settings.fetch_backoff[:settings.fetch_attempts - 1])
+    assert settings.fetch_attempts == 6 and waited == pytest.approx(6.75)
+    assert len(settings.fetch_backoff) >= settings.fetch_attempts - 1          # every wait is explicit

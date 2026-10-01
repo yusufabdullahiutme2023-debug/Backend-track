@@ -17,7 +17,8 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
-      # `program` listens to every Pump transaction; `creations` listens only to launches and is far
-      # cheaper, but switch only after the live comparison in the README shows it misses nothing.
+      # `creations` listens only to launches. A live comparison (see the README) found it delivered every
+      # launch the whole-program stream did, at about 1/60 of the credits. Set `program` to go back to
+      # listening to every Pump transaction; switching starts a new cursor ("monitor from now").
       - key: PUMP_WORKER_STREAM
-        value: program
+        value: creations

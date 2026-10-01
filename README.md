@@ -203,9 +203,10 @@ provider and no credits):
   are fetched with `getTransaction` and decoded. Everything else only advances the
   in-memory cursor, which is persisted with each heartbeat.
 - **Empty fetches are retried in place.** A just-confirmed transaction is often
-  not served yet, so the worker tries up to five times in all (waiting 0.25 s,
-  0.5 s, 1 s, then 2 s between attempts; a 429 waits for `Retry-After`) before
-  giving up. Only exhausted retries restart
+  not served yet, so the worker tries up to six times in all (waiting 0.25 s,
+  0.5 s, 1 s, 2 s, then 3 s between attempts, about 6.75 s in total; a 429 waits
+  for `Retry-After`) before giving up. Live runs left 4-5% of just-announced
+  launches unavailable after about 1.5 s, which is why the budget is that long. Only exhausted retries restart
   the connection, and the cursor never moves past an unverified creation.
 - **One Postgres connection**, reopened once if the server drops it. A launch and
   the cursor are still written in a single transaction.
@@ -228,7 +229,7 @@ Optional settings (environment variables on the worker):
 | --- | --- | --- |
 | `PUMP_WORKER_HEARTBEAT_SECONDS` | 15 | heartbeat interval |
 | `PUMP_WORKER_STALL_SECONDS` | 60 (300 for `creations`) | silence before the stream is rebuilt |
-| `PUMP_WORKER_STREAM` | `program` | what to listen to: `program` (every Pump transaction) or `creations` (only launches; see below) |
+| `PUMP_WORKER_STREAM` | `program` (the Render Blueprint sets `creations`) | what to listen to: `program` (every Pump transaction) or `creations` (only launches; see below) |
 | `PUMP_WORKER_BACKFILL_CONCURRENCY` | 4 | parallel `getTransaction` calls while catching up; use `1` on a plan limited to 10 requests/s |
 | `PUMP_WORKER_MAX_BACKFILL_PAGES` | 10 | pages of 1,000 signatures the worker may replay after a disconnect |
 
@@ -241,12 +242,21 @@ of the provider's history cannot be recovered this way.
 
 **Credits.** `getTransaction` and `getSignaturesForAddress` cost 1 Helius credit
 each. The WebSocket stream is metered separately, at 2 credits per 0.1 MB
-streamed, and the program-wide subscription delivers every buy and sell even
-though the worker skips them, so the stream, not the fetches, is likely now the
-main cost. Read the Helius usage page after the first hour before leaving the worker
-running. Narrowing the subscription itself to launches is available as
-`PUMP_WORKER_STREAM=creations` and is **off by default** until it has been checked
-on live data (next section).
+streamed, and a `program` subscription delivers every buy and sell even though
+the worker skips most of them. Measured on live data (see the results below):
+
+| | notifications | bytes each | stream credits per month at that rate |
+| --- | --- | --- | --- |
+| `program` stream | about 105 per second, half of them failed transactions | about 1.9 KB | about **10.4M** (the whole Developer plan) |
+| `creations` stream | about 0.4 per second | about 8.8 KB | about **0.2M** |
+
+With `creations` the one-credit `getTransaction` lookups (one per launch, about
+0.42 per second) are the larger cost, roughly 1.1M a month, so the worker uses
+about **1.3M credits a month** in total. The Helius Free plan (1M credits, 10
+requests per second) does not quite cover that and Developer (10M) does
+comfortably, so plan on Developer. These are single samples taken at about 09:10
+and 09:30 UTC on 2026-10-01; busy hours will be higher. Read the Helius usage page
+after the first hour before leaving the worker running.
 
 **Choosing the stream.** `program` subscribes to the Pump program, so every buy and
 sell is delivered and billed. `creations` subscribes to Pump's mint-authority
@@ -259,10 +269,8 @@ cursor: switching starts a new one ("monitor from now") and leaves the old one
 untouched. On the creations stream the subscription itself is the filter: every
 successful notification is fetched and verified by the decoder, so nothing depends
 on Pump's log text (the program stream still uses the create/create_v2 log line to
-skip trades). The one thing the IDL cannot prove is whether the provider's log
-subscription still matches the account when a transaction resolves it through an
-address lookup table instead of listing it in the message; that is what the
-comparison below measures.
+skip trades). The Render Blueprint runs `creations`; the code default stays
+`program` so an existing deployment keeps its cursor.
 
 #### Comparing the two streams on live data (spends credits)
 
@@ -288,6 +296,36 @@ line), so editing the tool or the workflow never spends credits, and there is no
 schedule. The limits in that file are enforced in code and cannot exceed the cap
 above. Read the result on the run page (summary and annotations).
 
+#### What the first live checks found (2026-10-01)
+
+Run 1, both streams for 199.6 s (stopped by its 40 MB budget, about 840 credits):
+
+- The creations stream delivered **all 64 launches** the program stream delivered
+  (0 missed). With zero misses in 64, the 95% upper bound on the miss rate is about
+  4.7% from this sample alone; the structural argument (the account is required by
+  `create` and `create_v2`) is what makes a real miss rate of zero plausible.
+- **22 of the 24 launches sampled list the mint authority only through an address
+  lookup table, and all 22 were delivered**, so the provider's log subscription does
+  match lookup-table accounts. This was the main unknown.
+- The same launch arrived on both streams within 7 ms of each other (median; p95
+  15 ms).
+- Program stream: 20,901 notifications (104.7 per second), 49.6% failed
+  transactions, 72 with missing or truncated logs (0.7% of the successful ones).
+
+Run 2, creations stream only for 599.6 s (about 89 credits):
+
+- 251 successful notifications and 19-20 failed attempts (about 7%); 272 in all.
+- **37 of the 38 transactions sampled decode as launches.** The 38th is the one
+  transaction the create/create_v2 log filter would have skipped, and it is not a
+  launch: it is a PumpSwap `CreatePool` that happens to include Pump's mint
+  authority. (Run 1 also had one filter skip, but it was not diagnosed because the
+  diagnosis was added afterwards, so it is not counted as evidence.) The creations
+  stream handles such look-alikes because the decoder, not the log text, decides.
+- 36 of the 38 resolve the authority through a lookup table.
+
+Not yet shown: behaviour at busy hours or across a Pump program upgrade. Re-run the
+comparison after any Pump upgrade (it takes one edit to the request file).
+
 #### Persistent worker hosting (Render Blueprint)
 
 `render.yaml` describes a **separate**, one-instance background worker in
@@ -299,7 +337,9 @@ actual charge before creating it. It is not provisioned by committing this file.
 
 In Render: **New → Blueprint → connect this GitHub repository → branch `main` →
 `render.yaml`**. The Blueprint deploys `main`, so merge the worker changes first.
-Before approving the initial creation, set the prompted secrets directly in Render:
+Before approving the initial creation, set the prompted secrets directly in Render
+(the Blueprint already sets `PUMP_WORKER_STREAM=creations`; plan on the Helius
+Developer plan, see Credits above):
 
 - `SOLANA_RPC_URL`: Helius **Mainnet HTTPS RPC URL** (not WSS). Do not paste in
   chat, Git, build logs, or a screenshot.

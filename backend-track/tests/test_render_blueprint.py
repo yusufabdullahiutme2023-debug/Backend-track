@@ -30,7 +30,13 @@ def test_no_secret_is_committed(worker):
     assert all(env.get('sync') is False and 'value' not in env for env in secrets.values())
 
 
-def test_the_whole_program_stream_stays_the_default_until_the_creations_stream_is_validated(worker):
+def test_the_blueprint_runs_the_validated_launches_only_stream(worker):
+    # Measured live: the whole-program stream is ~105 notifications/s (~10M credits a month, half of it
+    # failed transactions); the creations stream delivered every launch at ~1/60 of that.
     stream = [env for env in worker['envVars'] if env['key'] == 'PUMP_WORKER_STREAM'][0]
-    assert stream['value'] == 'program'
+    assert stream['value'] == 'creations'
     assert stream['value'] in pump_worker.STREAMS            # and it is a value the worker accepts
+
+
+def test_the_code_default_stays_the_old_stream_so_an_existing_deployment_keeps_its_cursor():
+    assert pump_worker.Settings.from_env({}).stream == 'program'

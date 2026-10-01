@@ -94,8 +94,10 @@ class Settings:
     backfill_concurrency: int = 4
     max_backfill_pages: int = 10          # x 1000 signatures; beyond it a person must approve
     max_queue: int = 10_000
-    fetch_attempts: int = 5
-    fetch_backoff: tuple = (0.25, 0.5, 1.0, 2.0)   # seconds waited between attempts
+    # Live runs found 4-5% of just-announced launches still unavailable after about 1.5 s, so the
+    # budget is ~6.75 s in total. It costs nothing when the transaction appears promptly.
+    fetch_attempts: int = 6
+    fetch_backoff: tuple = (0.25, 0.5, 1.0, 2.0, 3.0)   # seconds waited between attempts
     stream: str = 'program'                        # a key of STREAMS
 
     @property
