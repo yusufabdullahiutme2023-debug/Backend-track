@@ -1,0 +1,9 @@
+# Request for the bounded live comparison of the two Pump log subscriptions (see README).
+# Changing THIS FILE on the working branch starts one run of .github/workflows/stream-compare.yml;
+# bump `run=` to start another. Limits are enforced in pump_stream_compare.py and cannot be raised
+# from here: the stream spend is at most max_megabytes / 0.1 * 2 credits (40 MB -> 800), plus at
+# most `sample` single-credit getTransaction lookups.
+run=1
+seconds=300
+max_megabytes=40
+sample=25
