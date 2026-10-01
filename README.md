@@ -141,11 +141,16 @@ trade recommendations. No credentials or trading keys are required by this modul
 
 #### Pump.fun transaction replay (experimental)
 
-`backend-track/pump_replay.py` decodes official Pump program `create`,
-`create_v2`, and `buy` instruction discriminators from **raw** Solana
-`getTransaction` JSON. It verifies the program ID, required signers, successful
-execution, mint/curve accounts, slot window, and positive raw token-balance
-change for the buy instruction's user. No private wallet key is required.
+`backend-track/pump_replay.py` decodes official Pump program `create` and
+`create_v2` launches and the four buy instructions (`buy`, `buy_exact_sol_in`,
+`buy_v2`, `buy_exact_quote_in_v2`) from **raw** Solana `getTransaction` JSON. It
+verifies the program ID, required signers, successful execution, mint/curve
+accounts, slot window, and positive raw token-balance change for the buy
+instruction's user. Discriminators and account positions come from the official
+Pump IDL, and a test pins them to a snapshot of it
+(`tests/fixtures/pump_idl_subset.json`). Only **top-level** instructions are
+read: a creation or buy routed through another program (CPI) is not seen. No
+private wallet key is required.
 
 With a private provider URL in your shell environment (never commit it):
 
@@ -179,15 +184,67 @@ branch; do not merge solely to trigger this test without reviewing the changes.
 validates creation transactions against the official program ID and instruction
 discriminator, and stores launch evidence plus a crash-safe cursor in PostgreSQL.
 It subscribes before bounded reconnect backfill and refuses to silently cross a
-gap larger than 10,000 transactions. It is read-only and does **not** claim a
-verified first-buyer set, funding trace, PnL, or production alert signal.
+gap larger than 10,000 transactions (the default limit). It is read-only and
+does **not** claim a verified first-buyer set, funding trace, PnL, or production alert signal.
 
 Run only as a *separate persistent worker* with private `SOLANA_RPC_URL` (Helius
 Mainnet HTTPS URL) and `DATABASE_URL` in the worker's secret environment. Do not
 run it inside the web server or GitHub Actions: those are not persistent worker
-hosts. Monitor Helius credits and run reconciliation tests before deployment.
-Do not store the URL or credentials in Git or chat. If the worker encounters a
-history gap, investigate it; do not reset the cursor to hide missing events.
+hosts. Do not store the URL or credentials in Git or chat. If the worker
+encounters a history gap, investigate it; do not reset the cursor to hide missing
+events.
+
+How it stays live (the test suite exercises every point against fakes, with no
+provider and no credits):
+
+- **One fetch per launch, not per trade.** A logs notification already says
+  whether a transaction can be a creation. Only creation notifications, plus any
+  whose logs are missing or truncated (so a creation is never ruled out blind),
+  are fetched with `getTransaction` and decoded. Everything else only advances the
+  in-memory cursor, which is persisted with each heartbeat.
+- **Empty fetches are retried in place.** A just-confirmed transaction is often
+  not served yet, so the worker tries up to five times in all (waiting 0.25 s,
+  0.5 s, 1 s, then 2 s between attempts; a 429 waits for `Retry-After`) before
+  giving up. Only exhausted retries restart
+  the connection, and the cursor never moves past an unverified creation.
+- **One Postgres connection**, reopened once if the server drops it. A launch and
+  the cursor are still written in a single transaction.
+- **Backfill after a disconnect** skips transactions that failed on-chain and
+  fetches the rest with bounded concurrency, applying results strictly in order.
+- **Heartbeat and watchdog.** Every 15 s the worker upserts one row in
+  `pump_worker_heartbeat` and logs a counters line. A stream that delivers nothing
+  for 60 s is torn down and rebuilt. Reconnects wait 1, 2, 4 ... 60 s and the
+  ladder resets after a connection that lived a minute.
+
+Check on it from anywhere that can reach the database, without touching the
+provider: `DATABASE_URL=... python pump_worker.py --status` prints the heartbeat
+and exits `0` (streaming or backfilling, heartbeat fresh), `1` (stale, or
+reconnecting, stopped or `needs_manual_backfill`) or `2` (never started). Use
+`--max-age SECONDS` to change the 90 s staleness limit.
+
+Optional settings (environment variables on the worker):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PUMP_WORKER_HEARTBEAT_SECONDS` | 15 | heartbeat interval |
+| `PUMP_WORKER_STALL_SECONDS` | 60 | silence before the stream is rebuilt |
+| `PUMP_WORKER_BACKFILL_CONCURRENCY` | 4 | parallel `getTransaction` calls while catching up; use `1` on a plan limited to 10 requests/s |
+| `PUMP_WORKER_MAX_BACKFILL_PAGES` | 10 | pages of 1,000 signatures the worker may replay after a disconnect |
+
+If the gap since the cursor is larger than the page limit, or the cursor has aged
+out of the provider's history, the worker records status `needs_manual_backfill`,
+skips nothing, and re-checks only every five minutes. Decide whether you want the
+missed launches: if so, redeploy once with a higher `PUMP_WORKER_MAX_BACKFILL_PAGES`
+(each page can cost up to 1,000 credits to replay). A cursor that has aged out
+of the provider's history cannot be recovered this way.
+
+**Credits.** `getTransaction` and `getSignaturesForAddress` cost 1 Helius credit
+each. The WebSocket stream is metered separately, at 2 credits per 0.1 MB
+streamed, and the program-wide subscription delivers every buy and sell even
+though the worker skips them, so the stream, not the fetches, is likely now the
+main cost. Read the Helius usage page after the first hour before leaving the worker
+running. Narrowing the subscription itself to creations is the next saving and
+is **not** done yet.
 
 #### Persistent worker hosting (Render Blueprint)
 
@@ -242,7 +299,7 @@ mistake these short snapshots for persistent hosting.
 #### Early-buyer evidence and retrieving a run's findings
 
 `backend-track/pump_evidence.py` takes **one** RPC-verified launch and reports its
-early buyers with the proof behind each one: the decoded `buy` discriminator, the
+early buyers with the proof behind each one: the decoded buy instruction, the
 matching mint and bonding curve, a signing buyer, and a positive token balance
 delta. Every run also reports coverage accounting — pages scanned, in-window
 signatures seen, transactions attempted versus fetched, unavailable transactions,
