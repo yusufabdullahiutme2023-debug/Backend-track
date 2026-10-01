@@ -227,7 +227,8 @@ Optional settings (environment variables on the worker):
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PUMP_WORKER_HEARTBEAT_SECONDS` | 15 | heartbeat interval |
-| `PUMP_WORKER_STALL_SECONDS` | 60 | silence before the stream is rebuilt |
+| `PUMP_WORKER_STALL_SECONDS` | 60 (300 for `creations`) | silence before the stream is rebuilt |
+| `PUMP_WORKER_STREAM` | `program` | what to listen to: `program` (every Pump transaction) or `creations` (only launches; see below) |
 | `PUMP_WORKER_BACKFILL_CONCURRENCY` | 4 | parallel `getTransaction` calls while catching up; use `1` on a plan limited to 10 requests/s |
 | `PUMP_WORKER_MAX_BACKFILL_PAGES` | 10 | pages of 1,000 signatures the worker may replay after a disconnect |
 
@@ -243,8 +244,41 @@ each. The WebSocket stream is metered separately, at 2 credits per 0.1 MB
 streamed, and the program-wide subscription delivers every buy and sell even
 though the worker skips them, so the stream, not the fetches, is likely now the
 main cost. Read the Helius usage page after the first hour before leaving the worker
-running. Narrowing the subscription itself to creations is the next saving and
-is **not** done yet.
+running. Narrowing the subscription itself to launches is available as
+`PUMP_WORKER_STREAM=creations` and is **off by default** until it has been checked
+on live data (next section).
+
+**Choosing the stream.** `program` subscribes to the Pump program, so every buy and
+sell is delivered and billed. `creations` subscribes to Pump's mint-authority
+account instead (`TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM`, the PDA of the seed
+`mint-authority`, re-derived by a test). Pump's IDL lists it as account 1 of
+`create` and `create_v2` and of no other instruction, so almost only launches
+arrive, and backfill after a disconnect reads that account's history, so the
+10,000-signature limit covers hours instead of minutes. Each stream keeps its own
+cursor: switching starts a new one ("monitor from now") and leaves the old one
+untouched. The one thing the IDL cannot prove is whether the provider's log
+subscription still matches the account when a transaction resolves it through an
+address lookup table instead of listing it in the message; that is what the
+comparison below measures.
+
+#### Comparing the two streams on live data (spends credits)
+
+`backend-track/pump_stream_compare.py` opens both subscriptions at once for a fixed
+window and reports, with one number each: launches the program stream saw that the
+creations stream missed; real launches the log filter would skip; the real bytes
+per notification and the projected monthly credits of each stream; how often logs
+are missing or truncated; and whether launches that reach the authority through a
+lookup table are still delivered (it fetches a sample and says which case each
+was). It is read-only, never prints the provider URL, and is capped in time and in
+streamed bytes: the default request (300 s, 40 MB) cannot stream more than about
+800 credits' worth, plus at most 25 sampled `getTransaction` calls.
+
+It runs from `.github/workflows/stream-compare.yml`, using the existing
+`HELIUS_RPC_URL` Actions secret. The only thing that starts a push run is a change
+to `backend-track/stream_compare.request` on the working branch (bump its `run=`
+line), so editing the tool or the workflow never spends credits, and there is no
+schedule. The limits in that file are enforced in code and cannot exceed the cap
+above. Read the result on the run page (summary and annotations).
 
 #### Persistent worker hosting (Render Blueprint)
 
@@ -255,9 +289,9 @@ Render currently lists that worker compute tier at **$7/month**, plus any
 third-party API/database usage; check the Render confirmation screen for the
 actual charge before creating it. It is not provisioned by committing this file.
 
-In Render: **New → Blueprint → connect this GitHub repository → branch
-`arena/01a0ed1a-backend-track` → `render.yaml`**. Before approving the initial
-creation, set the prompted secrets directly in Render:
+In Render: **New → Blueprint → connect this GitHub repository → branch `main` →
+`render.yaml`**. The Blueprint deploys `main`, so merge the worker changes first.
+Before approving the initial creation, set the prompted secrets directly in Render:
 
 - `SOLANA_RPC_URL`: Helius **Mainnet HTTPS RPC URL** (not WSS). Do not paste in
   chat, Git, build logs, or a screenshot.

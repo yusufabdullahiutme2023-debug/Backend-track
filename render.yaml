@@ -4,7 +4,7 @@ services:
   - type: worker
     name: backend-track-pump-worker
     runtime: python
-    branch: arena/01a0ed1a-backend-track
+    branch: main
     rootDir: backend-track
     region: frankfurt
     plan: 0.5c-512mb
@@ -17,3 +17,7 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      # `program` listens to every Pump transaction; `creations` listens only to launches and is far
+      # cheaper, but switch only after the live comparison in the README shows it misses nothing.
+      - key: PUMP_WORKER_STREAM
+        value: program
