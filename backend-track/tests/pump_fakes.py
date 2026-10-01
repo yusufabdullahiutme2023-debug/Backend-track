@@ -209,6 +209,7 @@ class FakeStream:
     def __init__(self, scripts):
         self.scripts = list(scripts)
         self.connections = 0
+        self.requests = []         # the logsSubscribe request of every connection, in order
         self.server = None
 
     async def handler(self, ws):
@@ -216,6 +217,7 @@ class FakeStream:
         self.connections += 1
         request = json.loads(await ws.recv())
         assert request['method'] == 'logsSubscribe'
+        self.requests.append(request)
         await ws.send(json.dumps({'jsonrpc': '2.0', 'result': self.connections, 'id': request['id']}))
         for message in script:
             if message == 'close':

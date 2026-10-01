@@ -14,6 +14,7 @@ import time
 import pytest
 
 import pump_worker
+from pump_replay import MINT_AUTHORITY, PUMP_PROGRAM
 from pump_fakes import (BUY_LOGS, CREATE_LOGS, Done, FakeNode, FakeRpcServer, FakeStream, FakeWS,
                         MemoryStore, creation_tx, eventually, notification, plain_tx, signature)
 
@@ -358,7 +359,8 @@ def test_status_against_a_real_database(pg, monkeypatch, capsys):
     monkeypatch.setattr(store, 'close', lambda: None)
     monkeypatch.setenv('DATABASE_URL', 'unused')
     assert pump_worker.cli(['--status']) == 0
-    assert json.loads(capsys.readouterr().out)['last_slot'] == 42
+    report = json.loads(capsys.readouterr().out)
+    assert report['last_slot'] == 42 and report['checkpoint'] == pump_worker.CHECKPOINT_NAME
 
 
 # --- end to end: real worker loop, local WebSocket + JSON-RPC servers -----------------------
@@ -389,6 +391,7 @@ def run_busy_program(monkeypatch, store, beat_shows_all):
     node.null_once.add(creations[1])             # RPC lag: the first lookup of one creation is empty
     node.listing = [{'signature': 'latest', 'err': None}]
     state = pump_worker.WorkerState()
+    captured = {}
 
     async def scenario():
         with FakeRpcServer(node) as rpc:
@@ -401,14 +404,17 @@ def run_busy_program(monkeypatch, store, beat_shows_all):
                     await eventually(beat_shows_all)       # the heartbeat itself reports the totals
                 finally:
                     await stop(task)
+                captured['requests'] = stream.requests
     asyncio.run(scenario())
-    return creations, node, state
+    return creations, node, state, captured['requests']
 
 
 def test_end_to_end_a_busy_program_costs_one_fetch_per_creation(monkeypatch):
     store = MemoryStore(cursor=None)
-    creations, node, state = run_busy_program(
+    creations, node, state, requests = run_busy_program(
         monkeypatch, store, lambda: store.beats[-1]['stats']['launches'] == 3)
+    assert [r['params'][0]['mentions'] for r in requests] == [[PUMP_PROGRAM]]      # the default stream
+    assert requests[0]['params'][1] == {'commitment': 'confirmed'}
     assert store.beats[-1]['stats']['filtered'] == 300 and store.beats[-1]['status'] == 'streaming'
     assert [launch.signature for launch in store.launches] == creations
     # 304 notifications arrived; only the 3 creations were fetched (+1 retry for the laggy one).
@@ -459,7 +465,7 @@ def test_end_to_end_reconnect_replays_exactly_what_was_missed(monkeypatch):
 
 def test_end_to_end_on_real_postgres_uses_one_connection_for_everything(pg, monkeypatch):
     store, admin, schema = pg
-    creations, node, state = run_busy_program(
+    creations, node, state, requests = run_busy_program(
         monkeypatch, store,
         lambda: ((store.heartbeat_status() or {}).get('stats') or {}).get('launches') == 3)
     rows = [row[0] for row in store._run(lambda cur: (cur.execute(
@@ -471,3 +477,77 @@ def test_end_to_end_on_real_postgres_uses_one_connection_for_everything(pg, monk
     assert beat['stats']['filtered'] == 300 and beat['stats']['db_connects'] == 1
     # 304 notifications, several heartbeats, 3 launches and their cursor writes: still ONE connect.
     assert store.connects == 1
+
+
+# --- the creations stream -------------------------------------------------------------------
+
+CREATIONS = pump_worker.Settings(heartbeat_seconds=0.05, stall_seconds=5, backfill_concurrency=3,
+                                 fetch_attempts=4, fetch_backoff=(0.0,), stream='creations')
+
+
+@pytest.mark.parametrize('stream, address', [('program', PUMP_PROGRAM), ('creations', MINT_AUTHORITY)])
+def test_the_first_start_cursor_comes_from_the_streams_own_history(monkeypatch, stream, address):
+    seen = []
+    monkeypatch.setattr(pump_worker, 'rpc', lambda url, method, params: (
+        seen.append(params[0]), [{'signature': 'latest'}])[1])
+    install(monkeypatch, FakeFetch())
+    store = MemoryStore(cursor=None)
+    run_backfill(store, settings=pump_worker.Settings(heartbeat_seconds=600, stream=stream, fetch_backoff=(0,)))
+    assert seen == [address] and store.saves == [('latest', None)]
+
+
+def test_backfill_reads_the_creation_history_when_the_stream_is_creations(monkeypatch):
+    seen = []
+    sigs = [signature(n) for n in range(1, 4)]
+    page = list(reversed([{'signature': sig, 'err': None} for sig in sigs])) + [{'signature': 'cursor', 'err': None}]
+    monkeypatch.setattr(pump_worker, 'rpc', lambda url, method, params: (seen.append(params[0]), page)[1])
+    install(monkeypatch, FakeFetch({sigs[1]: creation_tx(sigs[1])}))
+    store = MemoryStore(cursor='cursor')
+    run_backfill(store, settings=pump_worker.Settings(heartbeat_seconds=600, stream='creations', fetch_backoff=(0,)))
+    assert set(seen) == {MINT_AUTHORITY} and [launch.signature for launch in store.launches] == [sigs[1]]
+
+
+def test_run_gives_each_stream_its_own_cursor_and_says_which_one_in_the_heartbeat(monkeypatch):
+    made = []
+
+    class RecordingStore(MemoryStore):
+        def __init__(self, db_url, checkpoint=None):
+            super().__init__()
+            made.append((db_url, checkpoint, self))
+
+    async def stop_now(*args):
+        raise asyncio.CancelledError
+    monkeypatch.setattr(pump_worker, 'Store', RecordingStore)
+    monkeypatch.setattr(pump_worker, 'watch_once', stop_now)
+    for stream in ('program', 'creations'):
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(pump_worker.run('url', 'postgresql://db', pump_worker.Settings(stream=stream)))
+    assert [(url, checkpoint) for url, checkpoint, _ in made] == [
+        ('postgresql://db', 'pump-fun-creations-v1'), ('postgresql://db', 'pump-fun-creations-v1-mint-authority')]
+    assert [store.beats[-1]['stats']['stream'] for _, _, store in made] == ['program', 'creations']
+
+
+def test_end_to_end_the_creations_stream_subscribes_to_and_backfills_from_the_mint_authority(monkeypatch):
+    first, second = signature(1), signature(2)
+    node = FakeNode()
+    node.txs.update({sig: creation_tx(sig) for sig in (first, second)})
+    # The mint authority's history holds launches only. One landed while the worker was away.
+    node.listing = [{'signature': first, 'err': None}, {'signature': 'cursor', 'err': None}]
+    store, state, captured = MemoryStore(cursor='cursor'), pump_worker.WorkerState(), {}
+
+    async def scenario():
+        with FakeRpcServer(node) as rpc:
+            async with FakeStream([[notification(second, CREATE_LOGS)]]) as stream:
+                monkeypatch.setattr(pump_worker, 'websocket_url', lambda url: stream.url)
+                task = asyncio.create_task(pump_worker.watch_once(rpc.url, store, CREATIONS, state))
+                try:
+                    await eventually(lambda: len(store.launches) == 2 and store.beats[-1]['stats']['launches'] == 2)
+                finally:
+                    await stop(task)
+                captured['requests'] = stream.requests
+    asyncio.run(scenario())
+    assert [r['params'][0]['mentions'] for r in captured['requests']] == [[MINT_AUTHORITY]]
+    assert {address for method, address in node.calls if method == 'getSignaturesForAddress'} == {MINT_AUTHORITY}
+    assert [launch.signature for launch in store.launches] == [first, second]   # backfilled one, then the live one
+    assert node.count('getTransaction') == 2
+    assert store.beats[-1]['stats']['stream'] == 'creations'

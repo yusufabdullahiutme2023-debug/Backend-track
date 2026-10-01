@@ -1,10 +1,11 @@
+import hashlib
 import json
 import pathlib
 
 import pytest
 
-from pump_replay import (BUY_LAYOUTS, DISCRIMINATORS, PUMP_PROGRAM, creation_log, decode58,
-                         log_verdict, parse_buys, parse_launch)
+from pump_replay import (BUY_LAYOUTS, DISCRIMINATORS, MINT_AUTHORITY, PUMP_PROGRAM, creation_log,
+                         decode58, log_verdict, parse_buys, parse_launch)
 
 ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 
@@ -216,3 +217,50 @@ def test_log_prefilter_matches_only_create_and_createv2():
 ])
 def test_log_verdict_never_rules_out_a_creation_it_cannot_see(logs, verdict):
     assert log_verdict(logs) == verdict
+
+
+# --- The mint authority: the one address only launch transactions mention ------------------------
+
+P = 2 ** 255 - 19
+D = -121665 * pow(121666, P - 2, P) % P
+
+
+def on_ed25519_curve(raw):
+    """True when 32 bytes decode to an ed25519 point (a PDA must NOT be one)."""
+    y = int.from_bytes(raw, 'little') & ((1 << 255) - 1)
+    u, v = (y * y - 1) % P, (D * y * y + 1) % P
+    x_squared = u * pow(v, P - 2, P) % P
+    return x_squared == 0 or pow(x_squared, (P - 1) // 2, P) == 1
+
+
+def derive_pda(seeds, program):
+    """Solana's find_program_address, in pure Python."""
+    number = 0
+    for char in program:
+        number = number * 58 + ALPHABET.index(char)
+    program_bytes = number.to_bytes(32, 'big')
+    for bump in range(255, -1, -1):
+        digest = hashlib.sha256(b''.join(seeds) + bytes([bump]) + program_bytes
+                                + b'ProgramDerivedAddress').digest()
+        if not on_ed25519_curve(digest):
+            return encode58(digest)
+    raise AssertionError('no valid bump')
+
+
+def test_mint_authority_constant_is_the_pda_of_its_seed():
+    # A typo in the constant would make a creations-only stream listen to an address nobody uses.
+    assert derive_pda([b'mint-authority'], PUMP_PROGRAM) == MINT_AUTHORITY
+
+
+def test_the_pda_helper_rejects_a_wrong_seed_or_program():
+    assert derive_pda([b'mint-authority '], PUMP_PROGRAM) != MINT_AUTHORITY
+    assert derive_pda([b'mint-authority'], 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL') != MINT_AUTHORITY
+
+
+def test_only_launch_instructions_carry_the_mint_authority():
+    # Computed over every instruction of the full IDL when the fixture was cut.
+    assert IDL['mint_authority_accounts'] == {'create': 1, 'create_v2': 1}
+    for kind in ('create', 'create_v2'):
+        assert IDL_INSTRUCTIONS[kind]['accounts'][1] == 'mint_authority'
+    for kind in BUY_KINDS:
+        assert 'mint_authority' not in IDL_INSTRUCTIONS[kind]['accounts']

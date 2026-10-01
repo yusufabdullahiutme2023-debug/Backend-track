@@ -202,5 +202,10 @@
     "program"
    ]
   }
- }
+ },
+ "mint_authority_accounts": {
+  "create": 1,
+  "create_v2": 1
+ },
+ "_note": "mint_authority_accounts was computed over every instruction in the full IDL, so it also records that no other instruction includes the account."
 }

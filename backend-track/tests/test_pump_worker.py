@@ -6,6 +6,7 @@ import urllib.error
 import pytest
 
 import pump_worker
+from pump_replay import MINT_AUTHORITY, PUMP_PROGRAM
 from pump_fakes import BUY_LOGS, CREATE_LOGS, notification, plain_tx, signature
 
 
@@ -217,3 +218,36 @@ def test_a_cursor_missing_from_provider_history_needs_a_person(monkeypatch):
     monkeypatch.setattr(pump_worker, 'rpc', lambda *a: [{'signature': 'unrelated'}])
     with pytest.raises(pump_worker.ManualBackfillRequired, match='cursor missing'):
         pump_worker.missed_items('private', 'previous')
+
+
+# --- Stream choice ---------------------------------------------------------------------------
+
+def test_the_program_stream_is_the_default_and_keeps_its_old_cursor_name():
+    settings = pump_worker.Settings.from_env({})
+    assert settings.stream == 'program' and settings.address == PUMP_PROGRAM
+    assert settings.checkpoint == pump_worker.CHECKPOINT_NAME == 'pump-fun-creations-v1'
+    assert settings.stall_seconds == 60.0
+
+
+def test_the_creations_stream_listens_to_the_mint_authority_with_its_own_cursor():
+    settings = pump_worker.Settings.from_env({'PUMP_WORKER_STREAM': 'creations'})
+    assert settings.address == MINT_AUTHORITY
+    assert settings.checkpoint != pump_worker.CHECKPOINT_NAME           # a signature from one history
+    assert settings.stall_seconds == 300.0                              # is not found in the other
+    explicit = pump_worker.Settings.from_env({'PUMP_WORKER_STREAM': ' creations ', 'PUMP_WORKER_STALL_SECONDS': '90'})
+    assert explicit.stream == 'creations' and explicit.stall_seconds == 90.0
+
+
+@pytest.mark.parametrize('value', ['everything', 'Program', 'mint-authority'])
+def test_an_unknown_stream_is_rejected_at_startup(value):
+    with pytest.raises(ValueError, match='PUMP_WORKER_STREAM must be one of: creations, program'):
+        pump_worker.Settings.from_env({'PUMP_WORKER_STREAM': value})
+
+
+def test_history_is_read_from_the_address_the_stream_mentions(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pump_worker, 'rpc', lambda url, method, params: (
+        seen.append(params[0]), [{'signature': 'newest'}, {'signature': 'cursor'}])[1])
+    pump_worker.missed_items('private', 'cursor')
+    pump_worker.missed_items('private', 'cursor', address=MINT_AUTHORITY)
+    assert seen == [PUMP_PROGRAM, MINT_AUTHORITY]

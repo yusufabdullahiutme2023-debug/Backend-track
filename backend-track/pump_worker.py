@@ -2,8 +2,12 @@
 
 Run as a dedicated persistent worker (see README). One process does, in order:
 
-1. Subscribe to confirmed Pump program logs FIRST, then replay what was missed since the
-   durable cursor, so nothing falls between the checkpoint and the stream.
+1. Subscribe to confirmed logs FIRST, then replay what was missed since the durable cursor,
+   so nothing falls between the checkpoint and the stream. Two streams are available
+   (``PUMP_WORKER_STREAM``): ``program`` mentions the Pump program, so every buy and sell is
+   delivered; ``creations`` mentions Pump's mint-authority account, which only launch
+   transactions include, so almost nothing else is delivered or billed. Each keeps its own
+   cursor.
 2. A logs notification already says whether a transaction can be a creation. Only those
    (plus any whose logs are missing or truncated, so a creation is never ruled out blind)
    are fetched with getTransaction and verified by the decoder. Everything else only moves
@@ -19,7 +23,9 @@ Run as a dedicated persistent worker (see README). One process does, in order:
    stream that goes silent is torn down and rebuilt.
 
 Provider quota still has to be watched in the provider dashboard: the stream itself is
-metered by data volume, independent of anything this process fetches.
+metered by data volume, independent of anything this process fetches. That is why the
+``creations`` stream exists; use it only after ``pump_stream_compare.py`` has shown on live
+data that it misses nothing the ``program`` stream sees.
 """
 import argparse
 import asyncio
@@ -42,10 +48,19 @@ from psycopg2.extras import Json
 import websockets
 
 from pump_discover import rpc
-from pump_replay import PUMP_PROGRAM, fetch_transaction, log_verdict, parse_launch
+from pump_replay import MINT_AUTHORITY, PUMP_PROGRAM, fetch_transaction, log_verdict, parse_launch
 
 log = logging.getLogger('pump-worker')
-CHECKPOINT_NAME = 'pump-fun-creations-v1'
+# What the worker listens to. Each stream has its own cursor, because a signature taken from one
+# address's history is not found in the other's. Switching streams therefore starts a new cursor
+# ("monitor from now"); the old one is left untouched. A creation-only stream is quiet enough that
+# silence has to last longer before it counts as a stall.
+STREAMS = {
+    'program': {'address': PUMP_PROGRAM, 'checkpoint': 'pump-fun-creations-v1', 'stall_seconds': 60.0},
+    'creations': {'address': MINT_AUTHORITY, 'checkpoint': 'pump-fun-creations-v1-mint-authority',
+                  'stall_seconds': 300.0},
+}
+CHECKPOINT_NAME = STREAMS['program']['checkpoint']
 HEALTHY_RUN_SECONDS = 60       # a connection that lived this long resets the reconnect backoff
 BASE_BACKOFF_SECONDS = 1       # first reconnect delay; doubles per consecutive failure
 MAX_BACKOFF_SECONDS = 60
@@ -75,6 +90,15 @@ class Settings:
     max_queue: int = 10_000
     fetch_attempts: int = 5
     fetch_backoff: tuple = (0.25, 0.5, 1.0, 2.0)   # seconds waited between attempts
+    stream: str = 'program'                        # a key of STREAMS
+
+    @property
+    def address(self):
+        return STREAMS[self.stream]['address']
+
+    @property
+    def checkpoint(self):
+        return STREAMS[self.stream]['checkpoint']
 
     @classmethod
     def from_env(cls, environ=None):
@@ -92,9 +116,13 @@ class Settings:
                 raise ValueError(f'{name} must be between {low} and {high}')
             return value
 
+        stream = (environ.get('PUMP_WORKER_STREAM') or '').strip() or cls.stream
+        if stream not in STREAMS:
+            raise ValueError(f'PUMP_WORKER_STREAM must be one of: {", ".join(sorted(STREAMS))}')
         return cls(
+            stream=stream,
             heartbeat_seconds=read('PUMP_WORKER_HEARTBEAT_SECONDS', cls.heartbeat_seconds, 1, 300, float),
-            stall_seconds=read('PUMP_WORKER_STALL_SECONDS', cls.stall_seconds, 10, 3600, float),
+            stall_seconds=read('PUMP_WORKER_STALL_SECONDS', STREAMS[stream]['stall_seconds'], 10, 3600, float),
             backfill_concurrency=read('PUMP_WORKER_BACKFILL_CONCURRENCY', cls.backfill_concurrency, 1, 16, int),
             max_backfill_pages=read('PUMP_WORKER_MAX_BACKFILL_PAGES', cls.max_backfill_pages, 1, 500, int),
         )
@@ -129,6 +157,7 @@ class WorkerState:
     def __init__(self):
         self.started_at = datetime.now(timezone.utc)
         self.status = 'starting'
+        self.stream = 'program'
         self.last_notification_at = None
         self.last_slot = None
         self.last_error = None
@@ -152,6 +181,7 @@ class WorkerState:
         with self._lock:
             stats = dict(self.counters)
         stats['db_connects'] = connects
+        stats['stream'] = self.stream
         stats['last_error'] = self.last_error
         return stats
 
@@ -167,8 +197,9 @@ class Store:
     so that retry is safe.
     """
 
-    def __init__(self, db_url, connect=psycopg2.connect):
+    def __init__(self, db_url, connect=psycopg2.connect, checkpoint=CHECKPOINT_NAME):
         self._db_url = db_url
+        self._checkpoint = checkpoint
         self._connect = connect
         self._conn = None
         self._lock = threading.Lock()
@@ -227,7 +258,7 @@ class Store:
     def cursor(self):
         def work(cur):
             cur.execute('SELECT signature FROM pump_worker_cursor WHERE name=%s',
-                        (CHECKPOINT_NAME,))
+                        (self._checkpoint,))
             row = cur.fetchone()
             return row[0] if row else None
         return self._run(work)
@@ -249,7 +280,7 @@ class Store:
                 inserted = cur.rowcount == 1
             cur.execute('''INSERT INTO pump_worker_cursor (name, signature) VALUES (%s,%s)
                            ON CONFLICT (name) DO UPDATE SET signature=EXCLUDED.signature,
-                           updated_at=now()''', (CHECKPOINT_NAME, signature))
+                           updated_at=now()''', (self._checkpoint, signature))
             return inserted
         return self._run(work)
 
@@ -262,36 +293,41 @@ class Store:
                                started_at=EXCLUDED.started_at,
                                last_notification_at=EXCLUDED.last_notification_at,
                                last_slot=EXCLUDED.last_slot, stats=EXCLUDED.stats''',
-                        (CHECKPOINT_NAME, status, started_at, last_notification_at, last_slot,
+                        (self._checkpoint, status, started_at, last_notification_at, last_slot,
                          Json(stats)))
         self._run(work)
 
     def heartbeat_status(self):
-        """The heartbeat as the database sees it (ages use the DB clock), or None."""
+        """The freshest heartbeat of any stream, as the database sees it (ages use the DB clock).
+
+        The newest beat belongs to whichever stream is running now, so ``--status`` needs no
+        knowledge of which one that is. None when no worker ever started.
+        """
         def work(cur):
-            cur.execute('''SELECT h.status, h.last_slot, h.stats, h.started_at,
+            cur.execute('''SELECT h.name, h.status, h.last_slot, h.stats, h.started_at,
                                   h.last_notification_at,
                                   extract(epoch FROM now() - h.beat_at),
                                   extract(epoch FROM now() - c.updated_at)
                            FROM pump_worker_heartbeat h
                            LEFT JOIN pump_worker_cursor c ON c.name = h.name
-                           WHERE h.name = %s''', (CHECKPOINT_NAME,))
+                           ORDER BY h.beat_at DESC LIMIT 1''')
             row = cur.fetchone()
             if row is None:
                 return None
             def iso(value):
                 return value.isoformat() if value is not None else None
-            return {'status': row[0], 'last_slot': row[1], 'stats': row[2],
-                    'started_at': iso(row[3]), 'last_notification_at': iso(row[4]),
-                    'heartbeat_age_seconds': float(row[5]),
-                    'cursor_age_seconds': float(row[6]) if row[6] is not None else None}
+            return {'checkpoint': row[0], 'status': row[1], 'last_slot': row[2], 'stats': row[3],
+                    'started_at': iso(row[4]), 'last_notification_at': iso(row[5]),
+                    'heartbeat_age_seconds': float(row[6]),
+                    'cursor_age_seconds': float(row[7]) if row[7] is not None else None}
         return self._run(work)
 
 
 # ------------------------------------------------------------------------ rpc helpers ----
 
-def missed_items(http_url, previous, max_pages=10, state=None):
-    """Signature entries newer than the cursor, oldest-first; fail closed if the backlog is too big."""
+def missed_items(http_url, previous, max_pages=10, state=None, address=PUMP_PROGRAM):
+    """Signature entries for ``address`` newer than the cursor, oldest-first; fail closed if the
+    backlog is too big. ``address`` is the one the stream mentions, so the cursor is found in it."""
     before = None
     found = []
     for _ in range(max_pages):
@@ -300,7 +336,7 @@ def missed_items(http_url, previous, max_pages=10, state=None):
             opts['before'] = before
         if state is not None:
             state.bump('rpc_calls')
-        page = rpc(http_url, 'getSignaturesForAddress', [PUMP_PROGRAM, opts])
+        page = rpc(http_url, 'getSignaturesForAddress', [address, opts])
         for item in page:
             if item['signature'] == previous:
                 return list(reversed(found))
@@ -471,13 +507,14 @@ async def backfill(http_url, store, settings, state):
         # First-ever start: establish a documented "monitor from now" cursor.
         state.bump('rpc_calls')
         latest = await asyncio.to_thread(rpc, http_url, 'getSignaturesForAddress',
-                                         [PUMP_PROGRAM, {'limit': 1}])
+                                         [settings.address, {'limit': 1}])
         if latest:
             await asyncio.to_thread(store.save, latest[0]['signature'], None)
             state.saved(latest[0]['signature'])
         return
     state.saved(previous)
-    items = await asyncio.to_thread(missed_items, http_url, previous, settings.max_backfill_pages, state)
+    items = await asyncio.to_thread(missed_items, http_url, previous, settings.max_backfill_pages,
+                                    state, settings.address)
     if items:
         log.info('Backfilling %d signatures since the cursor', len(items))
     since_flush = 0
@@ -540,15 +577,16 @@ async def watch_once(http_url, store, settings, state):
     # Subscribe FIRST, then backfill. This closes the gap between querying the
     # checkpoint and establishing the stream; duplicates are idempotent.
     state.status = 'connecting'
+    state.stream = settings.stream          # the heartbeat always names the stream it is running
     async with websockets.connect(websocket_url(http_url), ping_interval=30, ping_timeout=30,
                                   max_queue=settings.max_queue) as ws:
         await ws.send(json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'logsSubscribe',
-                                  'params': [{'mentions': [PUMP_PROGRAM]},
+                                  'params': [{'mentions': [settings.address]},
                                              {'commitment': 'confirmed'}]}))
         reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
         if reply.get('error') or not isinstance(reply.get('result'), int):
             raise RuntimeError('WebSocket subscription rejected')
-        log.info('Pump.fun subscription established')
+        log.info('Pump.fun subscription established (stream=%s)', settings.stream)
         try:
             await beat(store, state, status='backfilling')
             await backfill(http_url, store, settings, state)
@@ -563,8 +601,9 @@ async def watch_once(http_url, store, settings, state):
 
 async def run(http_url, db_url, settings=None, store=None):
     settings = settings or Settings.from_env()
-    store = store or Store(db_url)
+    store = store or Store(db_url, checkpoint=settings.checkpoint)
     state = WorkerState()
+    state.stream = settings.stream
     await asyncio.to_thread(store.prepare)
     failures = 0
     try:

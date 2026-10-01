@@ -13,6 +13,10 @@ import urllib.request
 from solana_signals import Buy, Launch
 
 PUMP_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'
+# Pump's mint-authority PDA: seeds [b'mint-authority'] under PUMP_PROGRAM. The official IDL lists it as
+# account 1 of `create` and `create_v2` and of no other instruction, so every launch transaction
+# mentions it and ordinary trades do not. A test re-derives the address from the seed.
+MINT_AUTHORITY = 'TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM'
 # Discriminators and account positions come from the official Pump IDL
 # (pump-fun/pump-public-docs, idl/pump.json). tests/fixtures/pump_idl_subset.json
 # snapshots exactly these entries and a test pins this table to it, so a typo here

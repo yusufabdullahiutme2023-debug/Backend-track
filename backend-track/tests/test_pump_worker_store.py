@@ -243,3 +243,30 @@ def test_heartbeat_is_one_row_that_is_overwritten_and_aged_by_the_database_clock
     assert 0 <= row['heartbeat_age_seconds'] < 5 and row['cursor_age_seconds'] is None
     store.save('cursor', None)
     assert 0 <= store.heartbeat_status()['cursor_age_seconds'] < 5
+
+
+def test_streams_keep_separate_cursors_and_the_newest_heartbeat_wins(pg):
+    program = pg[0]
+    creations = pump_worker.Store(program._db_url, connect=program._connect,
+                                  checkpoint=pump_worker.STREAMS['creations']['checkpoint'])
+    started = datetime.now(timezone.utc)
+    try:
+        program.save('program-signature', None)
+        assert creations.cursor() is None                      # a fresh stream starts from "now", not from the other's cursor
+        creations.save('mint-authority-signature', None)
+        assert program.cursor() == 'program-signature' and creations.cursor() == 'mint-authority-signature'
+
+        program.beat('streaming', started, None, 1, {'stream': 'program'})
+        time.sleep(0.05)
+        creations.beat('backfilling', started, None, 2, {'stream': 'creations'})
+        newest = program.heartbeat_status()                     # --status needs no idea which stream runs
+        assert newest['checkpoint'] == pump_worker.STREAMS['creations']['checkpoint']
+        assert newest['status'] == 'backfilling' and newest['stats'] == {'stream': 'creations'}
+        assert newest['cursor_age_seconds'] is not None          # joined to ITS cursor, not the other one's
+
+        time.sleep(0.05)
+        program.beat('streaming', started, None, 3, {'stream': 'program'})
+        assert creations.heartbeat_status()['checkpoint'] == pump_worker.CHECKPOINT_NAME
+        assert query(program, 'SELECT count(*) FROM pump_worker_heartbeat') == [(2,)]
+    finally:
+        creations.close()
