@@ -55,10 +55,16 @@ log = logging.getLogger('pump-worker')
 # address's history is not found in the other's. Switching streams therefore starts a new cursor
 # ("monitor from now"); the old one is left untouched. A creation-only stream is quiet enough that
 # silence has to last longer before it counts as a stall.
+#
+# ``filter_logs``: the program stream is mostly trades (and about half of them failed), so a log line
+# decides which notifications are worth a getTransaction. On the creations stream the subscription
+# itself is the filter: every successful notification mentions the mint authority, so each one is
+# verified by the decoder and nothing depends on Pump's log text.
 STREAMS = {
-    'program': {'address': PUMP_PROGRAM, 'checkpoint': 'pump-fun-creations-v1', 'stall_seconds': 60.0},
+    'program': {'address': PUMP_PROGRAM, 'checkpoint': 'pump-fun-creations-v1', 'stall_seconds': 60.0,
+                'filter_logs': True},
     'creations': {'address': MINT_AUTHORITY, 'checkpoint': 'pump-fun-creations-v1-mint-authority',
-                  'stall_seconds': 300.0},
+                  'stall_seconds': 300.0, 'filter_logs': False},
 }
 CHECKPOINT_NAME = STREAMS['program']['checkpoint']
 HEALTHY_RUN_SECONDS = 60       # a connection that lived this long resets the reconnect backoff
@@ -99,6 +105,10 @@ class Settings:
     @property
     def checkpoint(self):
         return STREAMS[self.stream]['checkpoint']
+
+    @property
+    def filter_logs(self):
+        return STREAMS[self.stream]['filter_logs']
 
     @classmethod
     def from_env(cls, environ=None):
@@ -402,12 +412,15 @@ def fetch_with_retry(http_url, signature, settings, state=None):
 
 # -------------------------------------------------------------------------- processing ----
 
-def classify(event):
+def classify(event, filter_logs=True):
     """What does one websocket message need? Returns ``(action, signature, slot)``.
 
     ``ignore`` (not a logs notification), ``malformed``, ``failed`` (failed on-chain),
     ``filtered`` (complete logs, no creation: skip), ``candidate`` (creation line) or
     ``unfiltered`` (logs missing/truncated: a creation cannot be ruled out).
+
+    With ``filter_logs=False`` (the creations stream) the subscription already did the
+    filtering, so every successful notification is a ``candidate`` whatever its logs say.
     """
     if not isinstance(event, dict) or event.get('method') != 'logsNotification':
         return 'ignore', None, None
@@ -420,6 +433,8 @@ def classify(event):
     slot = context.get('slot') if isinstance(context, dict) else None
     if value.get('err') is not None:
         return 'failed', value['signature'], slot
+    if not filter_logs:
+        return 'candidate', value['signature'], slot
     action = {'creation': 'candidate', 'unknown': 'unfiltered',
               'other': 'filtered'}[log_verdict(value.get('logs'))]
     return action, value['signature'], slot
@@ -475,7 +490,7 @@ async def handle(raw, http_url, store, settings, state):
     except ValueError:
         state.bump('malformed')
         return
-    action, signature, slot = classify(event)
+    action, signature, slot = classify(event, settings.filter_logs)
     if action == 'ignore':
         return
     if action == 'malformed':

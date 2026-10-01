@@ -256,7 +256,10 @@ account instead (`TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM`, the PDA of the s
 arrive, and backfill after a disconnect reads that account's history, so the
 10,000-signature limit covers hours instead of minutes. Each stream keeps its own
 cursor: switching starts a new one ("monitor from now") and leaves the old one
-untouched. The one thing the IDL cannot prove is whether the provider's log
+untouched. On the creations stream the subscription itself is the filter: every
+successful notification is fetched and verified by the decoder, so nothing depends
+on Pump's log text (the program stream still uses the create/create_v2 log line to
+skip trades). The one thing the IDL cannot prove is whether the provider's log
 subscription still matches the account when a transaction resolves it through an
 address lookup table instead of listing it in the message; that is what the
 comparison below measures.
@@ -269,9 +272,14 @@ creations stream missed; real launches the log filter would skip; the real bytes
 per notification and the projected monthly credits of each stream; how often logs
 are missing or truncated; and whether launches that reach the authority through a
 lookup table are still delivered (it fetches a sample and says which case each
-was). It is read-only, never prints the provider URL, and is capped in time and in
-streamed bytes: the default request (300 s, 40 MB) cannot stream more than about
-800 credits' worth, plus at most 25 sampled `getTransaction` calls.
+was, and whether the decoder accepts it as a launch). Every successful transaction
+the log filter would skip gets a full diagnosis: the instructions and programs that
+ran, and whether it decodes as a launch. It is read-only, never prints the provider
+URL, and is capped in time and in streamed bytes: the default request (300 s,
+40 MB) cannot stream more than about 800 credits' worth, plus at most 25 sampled
+`getTransaction` calls. With `streams=creations` in the request file it runs only the
+cheap subscription (about 15 credits per 200 s), which is enough to investigate the
+log filter, lookup tables and decoding without paying for the whole-program stream.
 
 It runs from `.github/workflows/stream-compare.yml`, using the existing
 `HELIUS_RPC_URL` Actions secret. The only thing that starts a push run is a change

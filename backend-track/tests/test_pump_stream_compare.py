@@ -15,7 +15,7 @@ import yaml
 import pump_stream_compare as compare_tool
 import pump_worker
 from pump_fakes import (BUY_LOGS, CREATE_LOGS, FakeNode, FakeRpcServer, FakeStream, creation_tx,
-                        notification, signature)
+                        notification, plain_tx, signature)
 from pump_replay import MINT_AUTHORITY, PUMP_PROGRAM
 
 FAILED = {'InstructionError': [0, 'Custom']}
@@ -158,23 +158,23 @@ def test_authority_position_understands_both_key_encodings_and_both_places():
 
 # --- sampling -------------------------------------------------------------------------------
 
-def test_the_sample_starts_with_every_miss_then_spreads_across_the_window():
-    notes = [notification(signature(n), CREATE_LOGS, slot=100 + n) for n in range(40)]
-    program, creations = stream_pair(notes, notes[:10] + notes[12:])         # launches 10 and 11 are missed
-    result = compare_tool.compare(program, creations)
-    sample = compare_tool.choose_sample(program, creations, result, 8)
-    assert sample[:2] == [signature(10), signature(11)] and len(sample) == 8 and len(set(sample)) == 8
-    slots = [program.records[sig]['slot'] for sig in sample[2:]]
-    assert slots == sorted(slots) and slots[-1] - slots[0] > 10                # spread, not clustered
-    assert compare_tool.choose_sample(program, creations, result, 0) == []
-    assert compare_tool.choose_sample(compare_tool.Tap('p', 'x'), compare_tool.Tap('c', 'y'),
-                                      compare_tool.compare(compare_tool.Tap('p', 'x'), compare_tool.Tap('c', 'y')), 5) == []
+def test_the_sample_starts_with_the_priority_signatures_then_spreads_across_the_rest():
+    ordered = [signature(n) for n in range(40)]
+    priority = [signature(31), signature(7), signature(31)]                   # a repeat is inspected once
+    sample = compare_tool.choose_sample(priority, ordered, 8)
+    assert sample[:2] == [signature(31), signature(7)] and len(sample) == 8 and len(set(sample)) == 8
+    spread = [ordered.index(sig) for sig in sample[2:]]
+    assert spread == sorted(spread) and spread[-1] - spread[0] > 20            # spread out, not clustered
+    assert compare_tool.choose_sample(priority, ordered, 0) == []
+    assert compare_tool.choose_sample(priority, ordered, 1) == [signature(31)]  # priority is never crowded out
+    assert compare_tool.choose_sample([], [], 5) == []
 
 
 # --- the verdict ----------------------------------------------------------------------------
 
-def report(launches=80, missed=(), skips=(), only=(), lookup=None, errors=(None, None)):
-    return {'streams': {'program': {'error': errors[0]}, 'creations': {'error': errors[1]}},
+def report(launches=80, missed=(), skips=(), only=(), lookup=None, errors=(None, None), details=()):
+    return {'mode': 'both', 'filter_skip_details': list(details),
+            'streams': {'program': {'error': errors[0]}, 'creations': {'error': errors[1]}},
             'compare': {'launches': launches, 'missed': list(missed), 'prefilter_skips': list(skips),
                         'prefilter_skips_by_side': {'program': len(skips), 'creations': 0},
                         'creations_only': list(only)},
@@ -188,20 +188,41 @@ def test_a_clean_run_is_called_safe_to_try_with_the_statistical_limit_and_the_un
 
 
 def test_a_run_that_saw_lookup_tables_says_how_they_fared():
-    lookup = {'authority_listed': {'static': 18, 'loaded': 4}, 'delivered_by_creations_stream': {'static': 18, 'loaded': 4}}
+    lookup = {'authority_listed': {'static': 18, 'loaded': 4}, 'delivered_by_creations_stream': {'static': 18, 'loaded': 4},
+              'decoded_as_launch': 22, 'not_a_launch': 0, 'sampled': 23, 'fetch_failed': 1}
     text = compare_tool.assess(report(lookup=lookup))
     assert '4 sampled launches resolved the authority through a lookup table and were still delivered (4 of 4)' in text
+    assert '22 of 22 sampled transactions decode as launches' in text
     assert 'untested' not in text
 
 
 @pytest.mark.parametrize('changes, expected', [
     ({'missed': ['a', 'b']}, 'missed 2 of 80 launches'),
-    ({'skips': ['a']}, 'would skip 1 real launches'),
     ({'lookup': {'authority_listed': {'absent': 3}, 'delivered_by_creations_stream': {}}}, '3 sampled launches do not include the authority'),
 ])
-def test_any_problem_blocks_the_recommendation(changes, expected):
+def test_a_problem_with_the_creations_stream_blocks_the_recommendation(changes, expected):
     text = compare_tool.assess(report(**changes))
     assert text.startswith('do not enable the creations stream') and expected in text
+
+
+def skip_detail(accepts):
+    return {'signature': 'x' * 64, 'decoder_accepts': accepts, 'instructions': ['Buy'], 'programs': ['6EF8rr'],
+            'authority': 'loaded', 'version': '0', 'log_lines': 30, 'log_head': []}
+
+
+def test_a_log_filter_hole_is_the_program_streams_problem_not_the_creations_streams():
+    # The creations stream verifies every successful notification with the decoder, so a filter
+    # skip is reported separately and does not block it.
+    text = compare_tool.assess(report(skips=['a'], details=[skip_detail(True)]))
+    assert text.startswith('no misses in 80 launches') and 'looks safe to try' in text
+    assert 'program-mode log filter would skip 1 successful transactions' in text
+    assert 'Of the 1 inspected, 1 decode as launches (real launches the program stream would miss)' in text
+    assert 'the creations stream does not use that filter' in text
+    harmless = compare_tool.assess(report(skips=['a'], details=[skip_detail(False)]))
+    assert 'Of the 1 inspected, 0 decode as launches (none is a launch)' in harmless
+    assert compare_tool.assess(report()).count('log filter') == 0               # nothing to say when nothing was skipped
+    blocked = compare_tool.assess(report(missed=['m'], skips=['a'], details=[skip_detail(True)]))
+    assert blocked.startswith('do not enable') and 'program-mode log filter would skip 1' in blocked
 
 
 def test_too_few_launches_is_inconclusive_not_clean():
@@ -223,7 +244,7 @@ def test_launches_only_the_narrow_stream_delivered_are_a_note_not_a_problem():
 def test_request_file_parsing(tmp_path):
     path = tmp_path / 'request'
     path.write_text('# a comment\n\nrun=7\nseconds=120\nmax_megabytes = 20\nsample=0\n')
-    assert compare_tool.read_request(path) == {'seconds': 120, 'max_megabytes': 20, 'sample': 0}
+    assert compare_tool.read_request(path) == {'seconds': 120, 'max_megabytes': 20, 'sample': 0, 'streams': 'both'}
     path.write_text('run=1\n')
     assert compare_tool.read_request(path) == compare_tool.DEFAULTS
 
@@ -232,12 +253,19 @@ def test_request_file_parsing(tmp_path):
     ('seconds=5\n', 'seconds must be between 30 and 900'), ('seconds=9000\n', 'seconds must be between'),
     ('max_megabytes=500\n', 'max_megabytes must be between 1 and 60'), ('sample=-1\n', 'sample must be between'),
     ('seconds=soon\n', 'must be a whole number'), ('speed=fast\n', "unknown setting 'speed'"),
+    ('streams=program\n', 'streams must be one of: both, creations'), ('streams=\n', 'streams must be one of'),
 ])
 def test_request_file_cannot_raise_the_ceiling_or_smuggle_settings(tmp_path, text, message):
     path = tmp_path / 'request'
     path.write_text(text)
     with pytest.raises(ValueError, match=message):
         compare_tool.read_request(path)
+
+
+def test_the_cheap_mode_can_be_requested(tmp_path):
+    path = tmp_path / 'request'
+    path.write_text('streams = creations\nseconds=600\n')
+    assert compare_tool.read_request(path)['streams'] == 'creations'
 
 
 def test_the_largest_request_is_still_a_bounded_spend():
@@ -289,6 +317,8 @@ def test_end_to_end_a_clean_comparison(monkeypatch):
     assert lookup['sampled'] == 6 and lookup['fetch_failed'] == 0
     assert sum(lookup['authority_listed'].values()) == 6
     assert lookup['delivered_by_creations_stream'] == lookup['authority_listed']        # everything sampled was delivered
+    assert lookup['decoded_as_launch'] == 6 and lookup['not_a_launch'] == 0             # the decoder accepts every launch
+    assert result['mode'] == 'both' and result['filter_skip_details'] == []
     assert node.count('getTransaction') == 6                                            # the only RPC spend
     json.dumps(result)                                                                  # the report is serializable
 
@@ -350,7 +380,7 @@ def test_provider_error_text_never_reaches_the_report_or_the_annotations(monkeyp
 def test_annotations_are_few_short_and_public(monkeypatch):
     program, creations, node = traffic(miss={10})
     lines = compare_tool.annotation_lines(collect_live(monkeypatch, program, creations, node))
-    assert 6 <= len(lines) <= 8
+    assert 6 <= len(lines) <= 9
     assert all(line.startswith(('::notice::', '::warning::')) and len(line) <= 912 for line in lines)
     assert any(line.startswith('::warning::') and 'missed by the creations stream: 1' in line for line in lines)
     assert any('Assessment: do not enable' in line for line in lines)
@@ -495,3 +525,196 @@ def test_a_committed_request_file_stays_within_the_agreed_spend():
     ceiling = request['max_megabytes'] * 1e6 / compare_tool.BYTES_PER_UNIT * compare_tool.CREDITS_PER_UNIT
     assert ceiling <= 800                    # the figure agreed with the owner: a hard cap of ~800 stream credits
     assert request['seconds'] <= 600
+
+
+# --- diagnosing a transaction the log filter would skip ---------------------------------------
+
+def with_logs(tx, *lines):
+    tx['meta']['logMessages'] = list(lines)
+    return tx
+
+
+def test_programs_invoked_counts_inner_instructions_and_lookup_table_programs():
+    tx = creation_tx(signature(1), authority='loaded')
+    tx['transaction']['message']['instructions'].append({'programIdIndex': 0, 'accounts': [], 'data': ''})
+    tx['meta']['innerInstructions'] = [{'index': 0, 'instructions': [{'programIdIndex': 9, 'accounts': [], 'data': ''}]}]
+    programs = compare_tool.programs_invoked(tx)
+    assert PUMP_PROGRAM in programs and MINT_AUTHORITY in programs      # index 9 is the lookup-table address
+    assert programs == sorted(set(programs)) and signature(1)[:0] == ''
+
+
+def test_instruction_names_come_only_from_exact_instruction_log_lines():
+    tx = with_logs(creation_tx(signature(1)),
+                   'Program 6EF8rr invoke [1]', 'Program log: Instruction: CreateV2', 'Program log: Instruction: CreateV2',
+                   'Program log: Instruction: InitializeMint2', 'Program log: not an instruction line',
+                   'Program log: Instruction: Buy extra words', ' Program log: Instruction: Sell ')
+    assert compare_tool.instruction_names(tx) == ['CreateV2', 'InitializeMint2', 'Sell']
+    assert compare_tool.instruction_names(creation_tx(signature(1))) == []              # no logs at all
+    many = with_logs(creation_tx(signature(1)), *[f'Program log: Instruction: Step{n}' for n in range(30)])
+    assert len(compare_tool.instruction_names(many)) == 12
+
+
+def test_diagnose_says_whether_the_decoder_accepts_the_transaction_and_what_ran():
+    launch = with_logs(creation_tx(signature(1), authority='loaded'), *[f'line {n} ' + 'x' * 200 for n in range(20)])
+    detail = compare_tool.diagnose(launch, signature(1))
+    assert detail['decoder_accepts'] is True and detail['authority'] == 'loaded' and detail['version'] == 'legacy'
+    assert detail['log_lines'] == 20 and len(detail['log_head']) == 8 and all(len(line) <= 110 for line in detail['log_head'])
+    plain = compare_tool.diagnose(with_logs(plain_tx(signature(2)), 'Program log: Instruction: Transfer'), signature(2))
+    assert plain['decoder_accepts'] is False and plain['instructions'] == ['Transfer'] and plain['authority'] == 'absent'
+    assert 'decoder_accepts_launch=True' in compare_tool.describe_skip(detail) and len(compare_tool.describe_skip(detail)) < 400
+
+
+# --- the creations-only probe -----------------------------------------------------------------
+
+def test_probe_summarises_what_the_creations_stream_shows_alone():
+    notes = ([notification(signature(n), CREATE_LOGS, slot=100 + n) for n in range(1, 9)]
+             + [notification(signature(20), BUY_LOGS, slot=104), notification(signature(21), None, slot=105),
+                notification(signature(22), CREATE_LOGS, err=FAILED, slot=106)])
+    creations = tap_with(MINT_AUTHORITY, *notes)
+    result = compare_tool.probe(creations)
+    assert result['window'] == {'first_slot': 103, 'last_slot': 106}      # slots 101-108 seen, minus the 2-slot margin
+    # Inside the window: launches 3-6, the two odd successful transactions, and the one failed attempt.
+    assert result['successful'] == 6 and result['failed_attempts'] == 1
+    assert result['skips'] == [signature(20)] and result['unknown'] == [signature(21)]
+    assert compare_tool.probe(compare_tool.Tap('c', MINT_AUTHORITY))['window'] is None
+
+
+def traffic_with_filter_holes():
+    """Creations-stream traffic: launches, failed attempts, and two successful notifications whose logs
+    show no Create line: one is a real launch by the decoder's standard, the other is not a launch."""
+    node = FakeNode()
+    notes = [notification(signature(9000), CREATE_LOGS, err=FAILED, slot=995)]
+    for n in range(40):
+        slot, sig = 1000 + n * 3, signature(n)
+        notes.append(notification(sig, CREATE_LOGS, slot=slot))
+        node.txs[sig] = with_logs(creation_tx(sig, slot, authority='loaded' if n % 4 else 'static'),
+                                  'Program log: Instruction: CreateV2')
+    hole, odd = signature(500), signature(501)
+    node.txs[hole] = with_logs(creation_tx(hole, 1050), 'Program log: Instruction: Mystery')
+    node.txs[odd] = with_logs(plain_tx(odd, 1060), 'Program log: Instruction: Transfer')
+    notes += [notification(hole, BUY_LOGS, slot=1050), notification(odd, BUY_LOGS, slot=1060),
+              notification(signature(9001), CREATE_LOGS, slot=1200)]
+    return notes, node, hole, odd
+
+
+def probe_live(monkeypatch, notes, node, request):
+    captured = {}
+
+    async def scenario():
+        with FakeRpcServer(node) as rpc:
+            async with FakeStream(by_address={MINT_AUTHORITY: notes}) as stream:
+                monkeypatch.setattr(compare_tool, 'websocket_url', lambda url: stream.url)
+                result = await compare_tool.run(rpc.url, request)
+                captured['requests'] = stream.requests
+                return result
+    return asyncio.run(scenario()), captured['requests']
+
+
+def test_end_to_end_the_cheap_probe_never_opens_the_program_stream_and_diagnoses_filter_skips(monkeypatch):
+    notes, node, hole, odd = traffic_with_filter_holes()
+    result, requests = probe_live(monkeypatch, notes, node, {'seconds': 0.3, 'max_megabytes': 5, 'sample': 3, 'streams': 'creations'})
+    assert [r['params'][0]['mentions'] for r in requests] == [[MINT_AUTHORITY]]       # the expensive stream was never opened
+    assert result['mode'] == 'creations' and 'compare' not in result
+    assert result['streams']['program']['notifications'] == 0 and result['streams']['program']['bytes'] == 0
+    assert result['probe']['skips'] == sorted([hole, odd])
+    details = {d['signature']: d for d in result['filter_skip_details']}
+    assert set(details) == {hole, odd}                                  # skips are inspected even with a sample of 3
+    assert details[hole]['decoder_accepts'] is True and details[hole]['instructions'] == ['Mystery']
+    assert details[odd]['decoder_accepts'] is False and details[odd]['instructions'] == ['Transfer']
+    lookup = result['lookup_tables']
+    assert lookup['sampled'] == 3 and lookup['delivered_by_creations_stream'] is None   # nothing to compare against
+    assert lookup['decoded_as_launch'] == 2 and lookup['not_a_launch'] == 1
+    assert 'creations-only probe' in result['assessment'] and '(real launches the program stream would miss)' in result['assessment']
+    assert result['estimated_credits_spent'] < 10                                           # the whole point of this mode
+    assert node.count('getTransaction') == 3
+
+
+def test_the_cheap_probe_annotations_name_each_skip_and_stay_bounded(monkeypatch):
+    notes, node, hole, odd = traffic_with_filter_holes()
+    result, _ = probe_live(monkeypatch, notes, node, {'seconds': 0.3, 'max_megabytes': 5, 'sample': 4, 'streams': 'creations'})
+    lines = compare_tool.annotation_lines(result)
+    assert len(lines) <= 9 and all(len(line) <= 912 for line in lines)
+    skips = [line for line in lines if 'Log-filter skip:' in line]
+    assert len(skips) == 2 and all(line.startswith('::warning::') for line in skips)
+    assert any(f'{hole[:12]}.. decoder_accepts_launch=True' in line for line in skips)
+    assert any('Probe: ' in line for line in lines) and not any('Program stream:' in line for line in lines)
+    summary = compare_tool.summary_markdown(result)
+    assert '| not run |' in summary and f'`{hole[:12]}..' in summary and 'api-key' not in summary.lower()
+
+
+def test_a_probe_with_no_skips_says_so(monkeypatch):
+    node = FakeNode()
+    notes = []
+    for n in range(20):
+        sig = signature(n)
+        notes.append(notification(sig, CREATE_LOGS, slot=1000 + n * 3))
+        node.txs[sig] = creation_tx(sig, 1000 + n * 3)
+    result, _ = probe_live(monkeypatch, notes, node, {'seconds': 0.3, 'max_megabytes': 5, 'sample': 2, 'streams': 'creations'})
+    assert result['probe']['skips'] == [] and result['filter_skip_details'] == []
+    assert 'None would be skipped by the log filter.' in result['assessment']
+
+
+def test_cli_runs_the_cheap_mode_from_a_flag(monkeypatch, tmp_path, capsys):
+    notes, node, hole, odd = traffic_with_filter_holes()
+    monkeypatch.setitem(compare_tool.LIMITS, 'seconds', (0, 900))
+
+    async def scenario():
+        with FakeRpcServer(node) as rpc:
+            async with FakeStream(by_address={MINT_AUTHORITY: notes}) as stream:
+                monkeypatch.setattr(compare_tool, 'websocket_url', lambda url: stream.url)
+                monkeypatch.setenv('SOLANA_RPC_URL', rpc.url)
+                return await asyncio.to_thread(compare_tool.main, [
+                    '--streams', 'creations', '--seconds', '1', '--sample', '3', '--annotate',
+                    '--output', str(tmp_path / 'probe.json')])
+    code = asyncio.run(scenario())
+    saved = json.loads((tmp_path / 'probe.json').read_text())
+    out = capsys.readouterr().out
+    assert code == 0 and saved['mode'] == 'creations' and '"mode": "creations"' in out and 'Log-filter skip:' in out
+
+
+def test_the_cheap_mode_fails_only_when_its_own_stream_fails(monkeypatch, tmp_path):
+    node = FakeNode()
+    monkeypatch.setitem(compare_tool.LIMITS, 'seconds', (0, 900))
+
+    async def scenario():
+        with FakeRpcServer(node) as rpc:
+            async with FakeStream(by_address={MINT_AUTHORITY: []}, reject={MINT_AUTHORITY}) as stream:
+                monkeypatch.setattr(compare_tool, 'websocket_url', lambda url: stream.url)
+                monkeypatch.setenv('SOLANA_RPC_URL', rpc.url)
+                return await asyncio.to_thread(compare_tool.main, ['--streams', 'creations', '--seconds', '1', '--sample', '0',
+                                                                    '--output', str(tmp_path / 'o.json')])
+    assert asyncio.run(scenario()) == 1
+
+
+def worst_case_report(mode, skips):
+    """A report with every optional annotation present, to prove the assessment is never cut."""
+    stream = {'address': 'a', 'notifications': 9, 'unique_signatures': 9, 'malformed': 0, 'bytes': 9000, 'average_bytes': 1000,
+              'seconds': 100.0, 'per_second': 0.09, 'verdicts': {'creation': 9}, 'credits_in_window': 0.2,
+              'credits_per_month': 1234, 'error': None}
+    detail = {'signature': 'z' * 64, 'decoder_accepts': True, 'instructions': ['Step%d' % n for n in range(12)],
+              'programs': ['P%05d' % n for n in range(12)], 'authority': 'loaded', 'version': '0', 'log_lines': 99, 'log_head': []}
+    report = {'mode': mode, 'request': {}, 'stopped_by': 'time', 'streams': {'program': dict(stream), 'creations': dict(stream)},
+              'lookup_tables': {'sampled': 25, 'fetch_failed': 0, 'authority_listed': {'loaded': 22, 'static': 3},
+                                'delivered_by_creations_stream': {'loaded': 22, 'static': 3} if mode == 'both' else None,
+                                'transaction_versions': {'0': 25}, 'decoded_as_launch': 25, 'not_a_launch': 0},
+              'filter_skip_details': [dict(detail, signature=chr(97 + n) * 64) for n in range(skips)],
+              'estimated_credits_spent': 840, 'assessment': 'do not enable the creations stream: ' + 'because ' * 200}
+    if mode == 'both':
+        report['compare'] = {'window': {'first_slot': 1, 'last_slot': 2}, 'launches': 99, 'missed': [], 'prefilter_skips': ['s'] * skips,
+                             'prefilter_skips_by_side': {'program': skips, 'creations': 0}, 'unknown_on_creations': [],
+                             'creations_only': [], 'creations_failed_attempts': 0,
+                             'latency_seconds': {'matched': 5, 'median': 0.01, 'p95': 0.02, 'min': 0.0, 'max': 0.03}}
+    else:
+        report['probe'] = {'window': {'first_slot': 1, 'last_slot': 2}, 'successful': 9, 'failed_attempts': 0,
+                           'skips': ['s'] * skips, 'unknown': []}
+    return report
+
+
+@pytest.mark.parametrize('mode', ['both', 'creations'])
+@pytest.mark.parametrize('skips', [0, 1, 3, 5])
+def test_the_assessment_is_never_cut_however_many_skips_were_diagnosed(mode, skips):
+    lines = compare_tool.annotation_lines(worst_case_report(mode, skips))
+    assert len(lines) <= compare_tool.MAX_ANNOTATIONS and all(len(line) <= 912 for line in lines)
+    assert 'Assessment:' in lines[-1] and lines[-1].startswith('::warning::')
+    shown = sum('Log-filter skip:' in line for line in lines)
+    assert shown == min(skips, 1 if mode == 'both' else 3)        # what fits beside the fixed lines, never more

@@ -528,20 +528,22 @@ def test_run_gives_each_stream_its_own_cursor_and_says_which_one_in_the_heartbea
 
 
 def test_end_to_end_the_creations_stream_subscribes_to_and_backfills_from_the_mint_authority(monkeypatch):
-    first, second = signature(1), signature(2)
+    first, second, odd = signature(1), signature(2), signature(3)
     node = FakeNode()
     node.txs.update({sig: creation_tx(sig) for sig in (first, second)})
+    node.txs[odd] = plain_tx(odd)            # mentions the authority, is not a launch, logs show no Create
     # The mint authority's history holds launches only. One landed while the worker was away.
     node.listing = [{'signature': first, 'err': None}, {'signature': 'cursor', 'err': None}]
     store, state, captured = MemoryStore(cursor='cursor'), pump_worker.WorkerState(), {}
 
     async def scenario():
         with FakeRpcServer(node) as rpc:
-            async with FakeStream([[notification(second, CREATE_LOGS)]]) as stream:
+            async with FakeStream([[notification(second, CREATE_LOGS), notification(odd, BUY_LOGS)]]) as stream:
                 monkeypatch.setattr(pump_worker, 'websocket_url', lambda url: stream.url)
                 task = asyncio.create_task(pump_worker.watch_once(rpc.url, store, CREATIONS, state))
                 try:
-                    await eventually(lambda: len(store.launches) == 2 and store.beats[-1]['stats']['launches'] == 2)
+                    await eventually(lambda: len(store.launches) == 2 and store.beats[-1]['stats']['launches'] == 2
+                                     and store.cursor_value == odd and store.beats[-1]['stats']['candidates'] == 2)
                 finally:
                     await stop(task)
                 captured['requests'] = stream.requests
@@ -549,5 +551,8 @@ def test_end_to_end_the_creations_stream_subscribes_to_and_backfills_from_the_mi
     assert [r['params'][0]['mentions'] for r in captured['requests']] == [[MINT_AUTHORITY]]
     assert {address for method, address in node.calls if method == 'getSignaturesForAddress'} == {MINT_AUTHORITY}
     assert [launch.signature for launch in store.launches] == [first, second]   # backfilled one, then the live one
-    assert node.count('getTransaction') == 2
+    # The subscription is the filter here: the notification whose logs show no Create line is verified too
+    # (and found not to be a launch), so nothing depends on Pump's log text. Hence 3 fetches, not 2.
+    assert node.count('getTransaction') == 3 and [s for s, _ in store.saves][-1] == odd
     assert store.beats[-1]['stats']['stream'] == 'creations'
+    assert store.beats[-1]['stats']['candidates'] == 2 and store.beats[-1]['stats']['filtered'] == 0

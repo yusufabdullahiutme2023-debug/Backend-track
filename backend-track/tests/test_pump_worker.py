@@ -251,3 +251,19 @@ def test_history_is_read_from_the_address_the_stream_mentions(monkeypatch):
     pump_worker.missed_items('private', 'cursor')
     pump_worker.missed_items('private', 'cursor', address=MINT_AUTHORITY)
     assert seen == [PUMP_PROGRAM, MINT_AUTHORITY]
+
+
+def test_a_stream_filtered_by_its_subscription_trusts_it_instead_of_the_log_text():
+    buy_only = json.loads(notification('s', BUY_LOGS))                  # successful, no creation line
+    assert pump_worker.classify(buy_only)[0] == 'filtered'              # the program stream skips it
+    assert pump_worker.classify(buy_only, filter_logs=False)[0] == 'candidate'
+    for logs in (None, [], BUY_LOGS + ['Log truncated'], CREATE_LOGS):
+        assert pump_worker.classify(json.loads(notification('s', logs)), filter_logs=False)[0] == 'candidate'
+    failed = json.loads(notification('s', CREATE_LOGS, err={'InstructionError': [0, 'x']}))
+    assert pump_worker.classify(failed, filter_logs=False)[0] == 'failed'     # failures are never launches
+    assert pump_worker.classify({'jsonrpc': '2.0', 'result': 1}, filter_logs=False)[0] == 'ignore'
+
+
+def test_only_the_creations_stream_skips_the_log_filter():
+    assert pump_worker.Settings.from_env({}).filter_logs is True
+    assert pump_worker.Settings.from_env({'PUMP_WORKER_STREAM': 'creations'}).filter_logs is False
