@@ -11,7 +11,7 @@ import threading
 
 import websockets
 
-from pump_replay import DISCRIMINATORS, PUMP_PROGRAM
+from pump_replay import DISCRIMINATORS, MINT_AUTHORITY, PUMP_PROGRAM
 
 ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 CREATE_LOGS = [f'Program {PUMP_PROGRAM} invoke [1]', 'Program log: Instruction: CreateV2',
@@ -34,17 +34,28 @@ def signature(n, prefix='sig'):
     return f'{prefix}{n:05d}'.ljust(64, 'x')
 
 
-def creation_tx(sig, slot=100):
-    """A getTransaction result that parse_launch accepts as a create_v2 launch."""
+def creation_tx(sig, slot=100, authority='static'):
+    """A getTransaction result that parse_launch accepts as a create_v2 launch.
+
+    ``authority`` says where Pump's mint-authority account appears: ``static`` (in the message's
+    own account keys), ``loaded`` (resolved from an address lookup table) or ``absent``.
+    """
     mint, pool, user = ('M' + sig)[:40], ('P' + sig)[:40], ('U' + sig)[:40]
     keys = [mint, 'C' * 32, pool, 'A' * 32, 'G' * 32, 'H' * 32, user, 'Y' * 32, PUMP_PROGRAM]
-    ix = {'programIdIndex': 8, 'accounts': [0, 3, 2, 4, 5, 6],
+    meta = {'err': None, 'preTokenBalances': [], 'postTokenBalances': []}
+    accounts = [0, 3, 2, 4, 5, 6]
+    if authority == 'static':
+        keys[3] = MINT_AUTHORITY
+    elif authority == 'loaded':
+        meta['loadedAddresses'] = {'writable': [], 'readonly': [MINT_AUTHORITY]}
+        accounts[1] = len(keys)                 # the first loaded address follows the static keys
+    ix = {'programIdIndex': 8, 'accounts': accounts,
           'data': encode58(DISCRIMINATORS['create_v2'] + b'payload')}
     return {'slot': slot,
             'transaction': {'signatures': [sig], 'message': {
                 'header': {'numRequiredSignatures': 7}, 'accountKeys': keys,
                 'instructions': [ix]}},
-            'meta': {'err': None, 'preTokenBalances': [], 'postTokenBalances': []}}
+            'meta': meta}
 
 
 def plain_tx(sig, slot=100):
@@ -206,19 +217,29 @@ class FakeStream:
     an optional trailing ``'close'``, which drops the connection after the last message.
     An ``asyncio.Event`` in a script is a gate: the script pauses there until the test sets it."""
 
-    def __init__(self, scripts):
-        self.scripts = list(scripts)
+    def __init__(self, scripts=None, by_address=None, reject=()):
+        self.scripts = list(scripts or [])
+        self.by_address = by_address    # {address: script}: serve by what the client mentioned
+        self.reject = set(reject)       # addresses whose subscription is answered with an error
         self.connections = 0
         self.requests = []         # the logsSubscribe request of every connection, in order
         self.server = None
 
     async def handler(self, ws):
-        script = self.scripts[min(self.connections, len(self.scripts) - 1)]
+        index = self.connections
         self.connections += 1
         request = json.loads(await ws.recv())
         assert request['method'] == 'logsSubscribe'
         self.requests.append(request)
-        await ws.send(json.dumps({'jsonrpc': '2.0', 'result': self.connections, 'id': request['id']}))
+        if request['params'][0]['mentions'][0] in self.reject:
+            await ws.send(json.dumps({'jsonrpc': '2.0', 'error': {'code': -32602, 'message': 'rejected'},
+                                      'id': request['id']}))
+            return
+        if self.by_address is not None:
+            script = self.by_address[request['params'][0]['mentions'][0]]
+        else:
+            script = self.scripts[min(index, len(self.scripts) - 1)]
+        await ws.send(json.dumps({'jsonrpc': '2.0', 'result': index + 1, 'id': request['id']}))
         for message in script:
             if message == 'close':
                 return
